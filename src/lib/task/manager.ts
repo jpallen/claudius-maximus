@@ -20,6 +20,7 @@ import type {
   TaskIndex,
   TaskStatus,
   StepExecution,
+  StepAttempt,
   CreateTaskOptions,
 } from "./types";
 import type { Workflow } from "../workflow/types";
@@ -49,10 +50,20 @@ function getStepsDir(taskId: string): string {
   return join(getTaskDir(taskId), "steps");
 }
 
-/** Get the step log path */
+/** Get the step log path (legacy format) */
 function getStepPath(taskId: string, stepIndex: number, stepName: string): string {
   const paddedIndex = String(stepIndex + 1).padStart(2, "0");
   return join(getStepsDir(taskId), `${paddedIndex}-${stepName}.json`);
+}
+
+/** Get the step directory for a specific step */
+function getStepDir(taskId: string, stepName: string): string {
+  return join(getStepsDir(taskId), stepName);
+}
+
+/** Get the attempt file path */
+function getAttemptPath(taskId: string, stepName: string, attempt: number): string {
+  return join(getStepDir(taskId, stepName), `attempt-${attempt}.json`);
 }
 
 /**
@@ -417,4 +428,87 @@ export async function advanceStep(taskId: string): Promise<Task> {
   await saveTask(task);
 
   return task;
+}
+
+/**
+ * Load a step attempt from disk
+ */
+export async function loadAttempt(
+  taskId: string,
+  stepName: string,
+  attempt: number
+): Promise<StepAttempt> {
+  const attemptPath = getAttemptPath(taskId, stepName, attempt);
+  const file = Bun.file(attemptPath);
+
+  if (!(await file.exists())) {
+    throw new Error(`Attempt ${attempt} for step "${stepName}" not found`);
+  }
+
+  const content = await file.text();
+  return JSON.parse(content) as StepAttempt;
+}
+
+/**
+ * Save a step attempt to disk
+ */
+export async function saveAttempt(
+  taskId: string,
+  stepName: string,
+  attempt: StepAttempt
+): Promise<void> {
+  const attemptPath = getAttemptPath(taskId, stepName, attempt.attemptNumber);
+  const stepDir = getStepDir(taskId, stepName);
+  await mkdir(stepDir, { recursive: true });
+  await Bun.write(attemptPath, JSON.stringify(attempt, null, 2));
+}
+
+/**
+ * Mark a step attempt as explicitly completed
+ */
+export async function markStepComplete(
+  taskId: string,
+  stepName: string,
+  attempt: number,
+  message?: string
+): Promise<void> {
+  const attemptData = await loadAttempt(taskId, stepName, attempt);
+  attemptData.explicitlyCompleted = true;
+  attemptData.completionMessage = message;
+  attemptData.status = "completed";
+  attemptData.completedAt = new Date().toISOString();
+  await saveAttempt(taskId, stepName, attemptData);
+
+  // Update task.json with latest status
+  const task = await loadTask(taskId);
+  const stepIndex = task.steps.findIndex((s) => s.name === stepName);
+  if (stepIndex >= 0) {
+    task.steps[stepIndex].status = "completed";
+    await saveTask(task);
+  }
+}
+
+/**
+ * Mark a step attempt as explicitly failed
+ */
+export async function markStepFailed(
+  taskId: string,
+  stepName: string,
+  attempt: number,
+  reason: string
+): Promise<void> {
+  const attemptData = await loadAttempt(taskId, stepName, attempt);
+  attemptData.explicitlyFailed = true;
+  attemptData.error = reason;
+  attemptData.status = "failed";
+  attemptData.completedAt = new Date().toISOString();
+  await saveAttempt(taskId, stepName, attemptData);
+
+  // Update task.json with latest status
+  const task = await loadTask(taskId);
+  const stepIndex = task.steps.findIndex((s) => s.name === stepName);
+  if (stepIndex >= 0) {
+    task.steps[stepIndex].status = "failed";
+    await saveTask(task);
+  }
 }

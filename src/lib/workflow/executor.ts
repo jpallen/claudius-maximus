@@ -2,7 +2,7 @@
  * Workflow step executor
  */
 
-import type { Task } from "../task/types";
+import type { Task, StepAttempt } from "../task/types";
 import type { CmConfig, Workflow, WorkflowStep } from "./types";
 import { runClaude, parseClaudeOutput, type ClaudeResult } from "./claude-runner";
 import {
@@ -13,7 +13,11 @@ import {
   failTask,
   pauseTask,
   saveStepLog,
+  loadTask,
+  saveAttempt,
+  loadAttempt,
 } from "../task/manager";
+import { setupStopHook } from "../task/hooks";
 import { StepTimeoutError, ClaudeExecutionError } from "../errors";
 
 /** Result of executing a single step */
@@ -36,6 +40,22 @@ export interface WorkflowResult {
   error?: string;
   /** Number of steps completed */
   stepsCompleted: number;
+}
+
+/**
+ * Build completion instructions for the system prompt
+ */
+function buildCompletionInstructions(stepName: string): string {
+  return `
+## Task Completion (REQUIRED)
+
+You are running step "${stepName}". Before finishing, you MUST run one of:
+
+- **Success**: \`cm task complete --message "summary of what was done"\`
+- **Failure**: \`cm task fail --reason "what went wrong"\`
+
+You will be blocked from exiting until you run one of these commands.
+`.trim();
 }
 
 /**
@@ -87,18 +107,34 @@ async function executeStep(
     };
   }
 
-  // Mark step as running
+  // Determine attempt number
+  const currentStep = task.steps[stepIndex];
+  const attempt = (currentStep.currentAttempt || 0) + 1;
+
+  // Update task with new attempt number
   await updateStepStatus(task.id, stepIndex, {
     status: "running",
     startedAt: new Date().toISOString(),
+    currentAttempt: attempt,
   });
+
+  // Create initial attempt record
+  const attemptData: StepAttempt = {
+    attemptNumber: attempt,
+    status: "running",
+    startedAt: new Date().toISOString(),
+  };
+  await saveAttempt(task.id, step.name, attemptData);
+
+  // Setup Stop hook in the worktree
+  await setupStopHook(task.worktreePath);
 
   // Get allowed tools from config defaults
   const allowedTools = config.defaults?.allowedTools;
   const timeout = step.timeout || config.defaults?.timeout;
 
   try {
-    // Run Claude CLI
+    // Run Claude CLI with task context for completion tracking
     const result: ClaudeResult = await runClaude({
       prompt,
       agent: step.agent,
@@ -106,6 +142,10 @@ async function executeStep(
       cwd: task.worktreePath,
       timeout,
       stepName: step.name,
+      appendSystemPrompt: buildCompletionInstructions(step.name),
+      taskId: task.id,
+      taskStepName: step.name,
+      taskStepAttempt: attempt,
     });
 
     // Parse output
@@ -120,6 +160,45 @@ async function executeStep(
       timestamp: new Date().toISOString(),
     });
 
+    // Reload attempt to check explicit completion status
+    let updatedAttempt: StepAttempt;
+    try {
+      updatedAttempt = await loadAttempt(task.id, step.name, attempt);
+    } catch {
+      // If attempt file not found, create a basic one
+      updatedAttempt = attemptData;
+    }
+
+    // Check if step was explicitly marked
+    if (updatedAttempt.explicitlyFailed) {
+      await updateStepStatus(task.id, stepIndex, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        error: updatedAttempt.error,
+      });
+
+      return {
+        success: false,
+        shouldPause: false,
+        error: updatedAttempt.error,
+      };
+    }
+
+    if (updatedAttempt.explicitlyCompleted) {
+      await updateStepStatus(task.id, stepIndex, {
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        output: updatedAttempt.completionMessage || parsed.result,
+      });
+
+      return {
+        success: true,
+        shouldPause: false,
+        output: updatedAttempt.completionMessage || parsed.result,
+      };
+    }
+
+    // Fallback to exit code based success/failure (for backwards compatibility)
     if (result.success) {
       // Mark step as completed
       await updateStepStatus(task.id, stepIndex, {
@@ -253,7 +332,6 @@ export async function executeWorkflow(
     stepsCompleted++;
 
     // Reload task to get updated state
-    const { loadTask } = await import("../task/manager");
     task = await loadTask(task.id);
   }
 

@@ -21,7 +21,7 @@ export type StepStatus =
   | "failed" // Failed with error
   | "skipped"; // Skipped (e.g., after cancellation)
 
-/** Record of a step execution */
+/** Record of a step execution (lightweight pointer in task.json) */
 export interface StepExecution {
   /** Step name from workflow */
   name: string;
@@ -31,6 +31,8 @@ export interface StepExecution {
   agent?: AgentModel;
   /** Prompt sent to agent */
   prompt?: string;
+  /** Current attempt number (1-based) */
+  currentAttempt?: number;
   /** When step started */
   startedAt?: string;
   /** When step completed */
@@ -39,6 +41,28 @@ export interface StepExecution {
   output?: string;
   /** Error message (if failed) */
   error?: string;
+}
+
+/** Full execution record for a step attempt (stored in attempt-N.json) */
+export interface StepAttempt {
+  /** Attempt number (1-based) */
+  attemptNumber: number;
+  /** Current status */
+  status: StepStatus;
+  /** When attempt started */
+  startedAt: string;
+  /** When attempt completed */
+  completedAt?: string;
+  /** Claude CLI output */
+  output?: string;
+  /** Error message (if failed) */
+  error?: string;
+  /** Whether Claude explicitly marked step complete via cm task complete */
+  explicitlyCompleted?: boolean;
+  /** Whether Claude explicitly marked step failed via cm task fail */
+  explicitlyFailed?: boolean;
+  /** Message provided with cm task complete */
+  completionMessage?: string;
 }
 
 /** Complete task state */

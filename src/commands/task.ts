@@ -11,6 +11,8 @@ import {
   cancelTask,
   startTask,
   resumeTask,
+  markStepComplete,
+  markStepFailed,
 } from "../lib/task/manager";
 import { findAndLoadConfig, getWorkflow } from "../lib/workflow/loader";
 import { executeWorkflow, executeNextStep } from "../lib/workflow/executor";
@@ -446,6 +448,68 @@ export function createTaskCommand(): Command {
         await deleteTask(taskId);
         console.log(`Task ${taskId} deleted.`);
         console.log(`Worktree and branch removed.`);
+      } catch (error) {
+        handleError(error);
+      }
+    });
+
+  // cm task complete --message "..."
+  task
+    .command("complete")
+    .description("Mark current step attempt as successfully completed")
+    .option("-m, --message <message>", "Completion summary")
+    .action(async (options) => {
+      try {
+        const taskId = process.env.CM_TASK_ID;
+        const stepName = process.env.CM_STEP_NAME;
+        const attemptStr = process.env.CM_STEP_ATTEMPT;
+
+        if (!taskId || !stepName || !attemptStr) {
+          console.error(
+            "Not running in a task context (missing CM_TASK_ID, CM_STEP_NAME, or CM_STEP_ATTEMPT)"
+          );
+          process.exit(1);
+        }
+
+        const attempt = parseInt(attemptStr, 10);
+        if (isNaN(attempt) || attempt < 1) {
+          console.error(`Invalid attempt number: ${attemptStr}`);
+          process.exit(1);
+        }
+
+        await markStepComplete(taskId, stepName, attempt, options.message);
+        console.log(`Step "${stepName}" attempt ${attempt} marked complete.`);
+      } catch (error) {
+        handleError(error);
+      }
+    });
+
+  // cm task fail --reason "..."
+  task
+    .command("fail")
+    .description("Mark current step attempt as failed")
+    .requiredOption("-r, --reason <reason>", "Failure reason")
+    .action(async (options) => {
+      try {
+        const taskId = process.env.CM_TASK_ID;
+        const stepName = process.env.CM_STEP_NAME;
+        const attemptStr = process.env.CM_STEP_ATTEMPT;
+
+        if (!taskId || !stepName || !attemptStr) {
+          console.error(
+            "Not running in a task context (missing CM_TASK_ID, CM_STEP_NAME, or CM_STEP_ATTEMPT)"
+          );
+          process.exit(1);
+        }
+
+        const attempt = parseInt(attemptStr, 10);
+        if (isNaN(attempt) || attempt < 1) {
+          console.error(`Invalid attempt number: ${attemptStr}`);
+          process.exit(1);
+        }
+
+        await markStepFailed(taskId, stepName, attempt, options.reason);
+        console.log(`Step "${stepName}" attempt ${attempt} marked failed.`);
       } catch (error) {
         handleError(error);
       }

@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { APP_NAME, CLI_NAME, VERSION } from "./lib/constants";
 import { createDevCommand, maybeProxyToDevVersion } from "./commands/dev";
 import { createTaskCommand } from "./commands/task";
+import { createSystemCommand } from "./commands/system";
 
 async function main() {
   // Get args without the binary path
@@ -28,6 +29,9 @@ async function main() {
 
   // Add task command
   program.addCommand(createTaskCommand());
+
+  // Add system command (internal)
+  program.addCommand(createSystemCommand());
 
   // Add a placeholder command to show the structure works
   program

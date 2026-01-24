@@ -44,6 +44,14 @@ export interface ClaudeRunOptions {
   timeout?: number;
   /** Step name (for error messages) */
   stepName?: string;
+  /** Additional system prompt to append */
+  appendSystemPrompt?: string;
+  /** Task ID for completion tracking */
+  taskId?: string;
+  /** Step name for completion tracking */
+  taskStepName?: string;
+  /** Attempt number for completion tracking */
+  taskStepAttempt?: number;
 }
 
 /**
@@ -73,6 +81,10 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     cwd,
     timeout = DEFAULT_TIMEOUT_MS,
     stepName = "step",
+    appendSystemPrompt,
+    taskId,
+    taskStepName,
+    taskStepAttempt,
   } = options;
 
   // Build command arguments
@@ -87,16 +99,34 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     args.push("--allowedTools", allowedTools.join(","));
   }
 
+  if (appendSystemPrompt) {
+    args.push("--append-system-prompt", appendSystemPrompt);
+  }
+
+  // Build environment with task context
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    // Ensure non-interactive mode
+    CI: "true",
+  };
+
+  // Add task context env vars for completion tracking
+  if (taskId) {
+    env.CM_TASK_ID = taskId;
+  }
+  if (taskStepName) {
+    env.CM_STEP_NAME = taskStepName;
+  }
+  if (taskStepAttempt !== undefined) {
+    env.CM_STEP_ATTEMPT = String(taskStepAttempt);
+  }
+
   // Start the process
   const proc = Bun.spawn(args, {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: {
-      ...process.env,
-      // Ensure non-interactive mode
-      CI: "true",
-    },
+    env,
   });
 
   // Set up timeout

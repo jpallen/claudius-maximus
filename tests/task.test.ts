@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { createTestContext, type TestContext } from "./helpers";
 import { join } from "path";
-import { mkdtemp, rm, chmod } from "fs/promises";
+import { mkdtemp, rm, chmod, mkdir } from "fs/promises";
 import { tmpdir, homedir } from "os";
 
 /**
@@ -695,5 +695,907 @@ describe("workflow execution with mock Claude", () => {
     expect(listResult.stdout).toContain("Task B");
     expect(listResult.stdout).toContain("pending");
     expect(listResult.stdout).toContain("completed");
+  });
+});
+
+describe("task completion tracking", () => {
+  let ctx: TestContext;
+  let testRepoDir: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    testRepoDir = await createTestRepo();
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+    await rm(testRepoDir, { recursive: true, force: true });
+    await cleanupTaskData();
+  });
+
+  describe("cm task complete", () => {
+    it("fails when not in task context", async () => {
+      const result = await runCli(ctx, testRepoDir, ["task", "complete"]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Not running in a task context");
+    });
+
+    it("fails when CM_TASK_ID is missing", async () => {
+      const result = await runCli(ctx, testRepoDir, ["task", "complete"], {
+        CM_STEP_NAME: "test-step",
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Not running in a task context");
+    });
+
+    it("fails when CM_STEP_NAME is missing", async () => {
+      const result = await runCli(ctx, testRepoDir, ["task", "complete"], {
+        CM_TASK_ID: "test-task",
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Not running in a task context");
+    });
+
+    it("fails when CM_STEP_ATTEMPT is missing", async () => {
+      const result = await runCli(ctx, testRepoDir, ["task", "complete"], {
+        CM_TASK_ID: "test-task",
+        CM_STEP_NAME: "test-step",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Not running in a task context");
+    });
+
+    it("fails with invalid attempt number", async () => {
+      const result = await runCli(ctx, testRepoDir, ["task", "complete"], {
+        CM_TASK_ID: "test-task",
+        CM_STEP_NAME: "test-step",
+        CM_STEP_ATTEMPT: "invalid",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Invalid attempt number");
+    });
+
+    it("fails with zero attempt number", async () => {
+      const result = await runCli(ctx, testRepoDir, ["task", "complete"], {
+        CM_TASK_ID: "test-task",
+        CM_STEP_NAME: "test-step",
+        CM_STEP_ATTEMPT: "0",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Invalid attempt number");
+    });
+
+    it("marks step complete when env vars are set", async () => {
+      // First create a task with attempt file
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-task";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create task.json
+      const taskJson = {
+        id: taskId,
+        description: "Test task",
+        workflow: "default",
+        status: "running",
+        worktreePath: testRepoDir,
+        repoPath: testRepoDir,
+        currentStep: 0,
+        steps: [{ name: stepName, status: "running", currentAttempt: 1 }],
+        createdAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(tasksDir, taskId, "task.json"),
+        JSON.stringify(taskJson)
+      );
+
+      // Create attempt file
+      const attemptData = {
+        attemptNumber: 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      // Run complete with env vars
+      const result = await runCli(
+        ctx,
+        testRepoDir,
+        ["task", "complete", "--message", "All done"],
+        {
+          CM_TASK_ID: taskId,
+          CM_STEP_NAME: stepName,
+          CM_STEP_ATTEMPT: "1",
+        }
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("marked complete");
+
+      // Verify attempt file was updated
+      const updatedAttempt = JSON.parse(
+        await Bun.file(join(attemptDir, "attempt-1.json")).text()
+      );
+      expect(updatedAttempt.explicitlyCompleted).toBe(true);
+      expect(updatedAttempt.completionMessage).toBe("All done");
+      expect(updatedAttempt.status).toBe("completed");
+      expect(updatedAttempt.completedAt).toBeDefined();
+    });
+
+    it("marks step complete without message", async () => {
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-task-no-msg";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create task.json
+      const taskJson = {
+        id: taskId,
+        description: "Test task",
+        workflow: "default",
+        status: "running",
+        worktreePath: testRepoDir,
+        repoPath: testRepoDir,
+        currentStep: 0,
+        steps: [{ name: stepName, status: "running", currentAttempt: 1 }],
+        createdAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(tasksDir, taskId, "task.json"),
+        JSON.stringify(taskJson)
+      );
+
+      // Create attempt file
+      const attemptData = {
+        attemptNumber: 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      // Run complete without message
+      const result = await runCli(ctx, testRepoDir, ["task", "complete"], {
+        CM_TASK_ID: taskId,
+        CM_STEP_NAME: stepName,
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("marked complete");
+
+      // Verify attempt file was updated
+      const updatedAttempt = JSON.parse(
+        await Bun.file(join(attemptDir, "attempt-1.json")).text()
+      );
+      expect(updatedAttempt.explicitlyCompleted).toBe(true);
+      expect(updatedAttempt.completionMessage).toBeUndefined();
+    });
+
+    it("updates task.json step status when marking complete", async () => {
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-task-status";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create task.json
+      const taskJson = {
+        id: taskId,
+        description: "Test task",
+        workflow: "default",
+        status: "running",
+        worktreePath: testRepoDir,
+        repoPath: testRepoDir,
+        currentStep: 0,
+        steps: [{ name: stepName, status: "running", currentAttempt: 1 }],
+        createdAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(tasksDir, taskId, "task.json"),
+        JSON.stringify(taskJson)
+      );
+
+      // Create attempt file
+      const attemptData = {
+        attemptNumber: 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      // Run complete
+      await runCli(ctx, testRepoDir, ["task", "complete", "-m", "Done"], {
+        CM_TASK_ID: taskId,
+        CM_STEP_NAME: stepName,
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      // Verify task.json was updated
+      const updatedTask = JSON.parse(
+        await Bun.file(join(tasksDir, taskId, "task.json")).text()
+      );
+      expect(updatedTask.steps[0].status).toBe("completed");
+    });
+  });
+
+  describe("cm task fail", () => {
+    it("fails when not in task context", async () => {
+      const result = await runCli(ctx, testRepoDir, [
+        "task",
+        "fail",
+        "--reason",
+        "Something broke",
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Not running in a task context");
+    });
+
+    it("requires --reason flag", async () => {
+      const result = await runCli(ctx, testRepoDir, ["task", "fail"], {
+        CM_TASK_ID: "test-task",
+        CM_STEP_NAME: "test-step",
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("required");
+    });
+
+    it("marks step failed when env vars are set", async () => {
+      // First create a task with attempt file
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-task-fail";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create task.json
+      const taskJson = {
+        id: taskId,
+        description: "Test task",
+        workflow: "default",
+        status: "running",
+        worktreePath: testRepoDir,
+        repoPath: testRepoDir,
+        currentStep: 0,
+        steps: [{ name: stepName, status: "running", currentAttempt: 1 }],
+        createdAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(tasksDir, taskId, "task.json"),
+        JSON.stringify(taskJson)
+      );
+
+      // Create attempt file
+      const attemptData = {
+        attemptNumber: 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      // Run fail with env vars
+      const result = await runCli(
+        ctx,
+        testRepoDir,
+        ["task", "fail", "--reason", "Something broke"],
+        {
+          CM_TASK_ID: taskId,
+          CM_STEP_NAME: stepName,
+          CM_STEP_ATTEMPT: "1",
+        }
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("marked failed");
+
+      // Verify attempt file was updated
+      const updatedAttempt = JSON.parse(
+        await Bun.file(join(attemptDir, "attempt-1.json")).text()
+      );
+      expect(updatedAttempt.explicitlyFailed).toBe(true);
+      expect(updatedAttempt.error).toBe("Something broke");
+      expect(updatedAttempt.status).toBe("failed");
+      expect(updatedAttempt.completedAt).toBeDefined();
+    });
+
+    it("updates task.json step status when marking failed", async () => {
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-task-fail-status";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create task.json
+      const taskJson = {
+        id: taskId,
+        description: "Test task",
+        workflow: "default",
+        status: "running",
+        worktreePath: testRepoDir,
+        repoPath: testRepoDir,
+        currentStep: 0,
+        steps: [{ name: stepName, status: "running", currentAttempt: 1 }],
+        createdAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(tasksDir, taskId, "task.json"),
+        JSON.stringify(taskJson)
+      );
+
+      // Create attempt file
+      const attemptData = {
+        attemptNumber: 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      // Run fail
+      await runCli(
+        ctx,
+        testRepoDir,
+        ["task", "fail", "-r", "Test failure"],
+        {
+          CM_TASK_ID: taskId,
+          CM_STEP_NAME: stepName,
+          CM_STEP_ATTEMPT: "1",
+        }
+      );
+
+      // Verify task.json was updated
+      const updatedTask = JSON.parse(
+        await Bun.file(join(tasksDir, taskId, "task.json")).text()
+      );
+      expect(updatedTask.steps[0].status).toBe("failed");
+    });
+  });
+
+  describe("cm system stop-hook", () => {
+    it("allows exit when not in task context", async () => {
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe("");
+    });
+
+    it("allows exit when only CM_TASK_ID is set", async () => {
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+        CM_TASK_ID: "test-task",
+      });
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("allows exit when CM_STEP_ATTEMPT is invalid", async () => {
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+        CM_TASK_ID: "test-task",
+        CM_STEP_NAME: "test-step",
+        CM_STEP_ATTEMPT: "invalid",
+      });
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("allows exit when step is marked complete", async () => {
+      // Create task with completed attempt
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-hook-complete";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create completed attempt file
+      const attemptData = {
+        attemptNumber: 1,
+        status: "completed",
+        startedAt: new Date().toISOString(),
+        explicitlyCompleted: true,
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+        CM_TASK_ID: taskId,
+        CM_STEP_NAME: stepName,
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("allows exit when step is marked failed", async () => {
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-hook-failed";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create failed attempt file
+      const attemptData = {
+        attemptNumber: 1,
+        status: "failed",
+        startedAt: new Date().toISOString(),
+        explicitlyFailed: true,
+        error: "Test failure",
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+        CM_TASK_ID: taskId,
+        CM_STEP_NAME: stepName,
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("blocks exit when step is not marked", async () => {
+      // Create task with running (not completed) attempt
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-hook-block";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      // Create running attempt file (not marked complete)
+      const attemptData = {
+        attemptNumber: 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+        CM_TASK_ID: taskId,
+        CM_STEP_NAME: stepName,
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout).toContain("block");
+      expect(result.stdout).toContain("not marked complete");
+      expect(result.stdout).toContain("cm task complete");
+      expect(result.stdout).toContain("cm task fail");
+    });
+
+    it("blocks exit when attempt file does not exist", async () => {
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+        CM_TASK_ID: "nonexistent-task",
+        CM_STEP_NAME: "test-step",
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout).toContain("block");
+      expect(result.stdout).toContain("Cannot verify step completion");
+    });
+
+    it("outputs valid JSON when blocking", async () => {
+      const tasksDir = join(homedir(), ".cm", "tasks");
+      const taskId = "test-hook-json";
+      const stepName = "test-step";
+      const attemptDir = join(tasksDir, taskId, "steps", stepName);
+      await mkdir(attemptDir, { recursive: true });
+
+      const attemptData = {
+        attemptNumber: 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        join(attemptDir, "attempt-1.json"),
+        JSON.stringify(attemptData)
+      );
+
+      const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+        CM_TASK_ID: taskId,
+        CM_STEP_NAME: stepName,
+        CM_STEP_ATTEMPT: "1",
+      });
+
+      // Should be valid JSON
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.decision).toBe("block");
+      expect(parsed.reason).toContain("not marked complete");
+    });
+  });
+});
+
+describe("completion tracking integration", () => {
+  let ctx: TestContext;
+  let testRepoDir: string;
+  let mockDir: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    testRepoDir = await createTestRepo();
+    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-"));
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+    await rm(testRepoDir, { recursive: true, force: true });
+    await rm(mockDir, { recursive: true, force: true });
+    await cleanupTaskData();
+  });
+
+  /**
+   * Create a mock Claude that calls cm task complete
+   */
+  async function createCompletingMockClaude(
+    baseDir: string,
+    options: {
+      completionMessage?: string;
+      failWithReason?: string;
+    } = {}
+  ): Promise<{ scriptPath: string; logPath: string }> {
+    const scriptPath = join(baseDir, "mock-claude-completing");
+    const logPath = join(baseDir, "claude-calls.log");
+    const cliEntry = join(import.meta.dir, "..", "src", "index.ts");
+
+    const { completionMessage, failWithReason } = options;
+
+    // Create a shell script that calls cm task complete/fail
+    const script = `#!/bin/bash
+# Mock Claude CLI that marks steps complete
+
+echo "CALL: $@" >> "${logPath}"
+
+# Parse arguments
+PROMPT=""
+APPEND_SYSTEM=""
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -p)
+      PROMPT="$2"
+      shift 2
+      ;;
+    --append-system-prompt)
+      APPEND_SYSTEM="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+echo "PROMPT: $PROMPT" >> "${logPath}"
+echo "APPEND_SYSTEM: $APPEND_SYSTEM" >> "${logPath}"
+echo "ENV CM_TASK_ID: $CM_TASK_ID" >> "${logPath}"
+echo "ENV CM_STEP_NAME: $CM_STEP_NAME" >> "${logPath}"
+echo "ENV CM_STEP_ATTEMPT: $CM_STEP_ATTEMPT" >> "${logPath}"
+echo "---" >> "${logPath}"
+
+# Call cm task complete or fail
+${
+  failWithReason
+    ? `bun run "${cliEntry}" task fail --reason "${failWithReason}"`
+    : `bun run "${cliEntry}" task complete ${completionMessage ? `--message "${completionMessage}"` : ""}`
+}
+
+# Output JSON result
+echo '{"result": "Task handled"}'
+exit 0
+`;
+
+    await Bun.write(scriptPath, script);
+    await chmod(scriptPath, 0o755);
+    await Bun.write(logPath, "");
+
+    return { scriptPath, logPath };
+  }
+
+  it("creates attempt files during step execution", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    // Create and run a task
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test attempt files", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(createResult.exitCode).toBe(0);
+
+    // Extract task ID
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Check that attempt file was created
+    const tasksDir = join(homedir(), ".cm", "tasks");
+    const attemptFile = Bun.file(
+      join(tasksDir, taskId, "steps", "execute", "attempt-1.json")
+    );
+    expect(await attemptFile.exists()).toBe(true);
+
+    const attemptData = JSON.parse(await attemptFile.text());
+    expect(attemptData.attemptNumber).toBe(1);
+    expect(attemptData.startedAt).toBeDefined();
+  });
+
+  it("passes environment variables to Claude subprocess", async () => {
+    const { scriptPath, logPath } = await createCompletingMockClaude(mockDir, {
+      completionMessage: "Done via env",
+    });
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test env vars", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(createResult.exitCode).toBe(0);
+
+    // Check the log to verify env vars were passed
+    const log = await readMockLog(logPath);
+    expect(log).toContain("ENV CM_TASK_ID:");
+    expect(log).toContain("ENV CM_STEP_NAME: execute");
+    expect(log).toContain("ENV CM_STEP_ATTEMPT: 1");
+  });
+
+  it("passes append-system-prompt to Claude", async () => {
+    const { scriptPath, logPath } = await createCompletingMockClaude(mockDir);
+
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test system prompt", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const log = await readMockLog(logPath);
+    expect(log).toContain("APPEND_SYSTEM:");
+    expect(log).toContain("Task Completion");
+    expect(log).toContain("cm task complete");
+    expect(log).toContain("cm task fail");
+  });
+
+  it("workflow succeeds when Claude calls cm task complete", async () => {
+    const { scriptPath } = await createCompletingMockClaude(mockDir, {
+      completionMessage: "Successfully completed the task",
+    });
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test complete flow", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Workflow completed");
+
+    // Check attempt file shows explicit completion
+    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const tasksDir = join(homedir(), ".cm", "tasks");
+    const attemptData = JSON.parse(
+      await Bun.file(
+        join(tasksDir, taskId, "steps", "execute", "attempt-1.json")
+      ).text()
+    );
+    expect(attemptData.explicitlyCompleted).toBe(true);
+    expect(attemptData.completionMessage).toBe("Successfully completed the task");
+  });
+
+  it("workflow fails when Claude calls cm task fail", async () => {
+    const { scriptPath } = await createCompletingMockClaude(mockDir, {
+      failWithReason: "Could not complete the task",
+    });
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test fail flow", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Workflow failed");
+
+    // Check attempt file shows explicit failure
+    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const tasksDir = join(homedir(), ".cm", "tasks");
+    const attemptData = JSON.parse(
+      await Bun.file(
+        join(tasksDir, taskId, "steps", "execute", "attempt-1.json")
+      ).text()
+    );
+    expect(attemptData.explicitlyFailed).toBe(true);
+    expect(attemptData.error).toBe("Could not complete the task");
+  });
+
+  it("sets up stop hook in worktree", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    // Create task to trigger hook setup
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test hook setup", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(createResult.exitCode).toBe(0);
+
+    // Extract task ID and find worktree
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+
+    // Check that .claude/settings.json was created with stop hook
+    const settingsFile = Bun.file(join(worktreePath, ".claude", "settings.json"));
+    expect(await settingsFile.exists()).toBe(true);
+
+    const settings = JSON.parse(await settingsFile.text());
+    expect(settings.hooks).toBeDefined();
+    expect(settings.hooks.Stop).toBeDefined();
+    expect(settings.hooks.Stop.length).toBeGreaterThan(0);
+
+    // Check hook has the right command
+    const stopHook = settings.hooks.Stop[0];
+    expect(stopHook.matcher).toBe("*");
+    expect(stopHook.hooks[0].command).toBe("cm system stop-hook");
+  });
+
+  it("preserves existing settings when setting up stop hook", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    // Create task without starting to get worktree
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test preserve settings", "--no-start"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+
+    // Create existing settings
+    const claudeDir = join(worktreePath, ".claude");
+    await mkdir(claudeDir, { recursive: true });
+    const existingSettings = {
+      someExistingSetting: true,
+      hooks: {
+        PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: "echo test" }] }],
+      },
+    };
+    await Bun.write(
+      join(claudeDir, "settings.json"),
+      JSON.stringify(existingSettings)
+    );
+
+    // Run the task to trigger hook setup
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "run", taskId],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    // Check that existing settings are preserved
+    const settings = JSON.parse(
+      await Bun.file(join(claudeDir, "settings.json")).text()
+    );
+    expect(settings.someExistingSetting).toBe(true);
+    expect(settings.hooks.PreToolUse).toBeDefined();
+    expect(settings.hooks.Stop).toBeDefined();
+  });
+
+  it("does not duplicate stop hook on multiple runs", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    // Create task
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test no duplicate", "--no-start"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+
+    // Run step to trigger first hook setup
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "step", taskId],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    // Get initial hook count
+    let settings = JSON.parse(
+      await Bun.file(join(worktreePath, ".claude", "settings.json")).text()
+    );
+    const initialHookCount = settings.hooks.Stop.length;
+
+    // Run another step
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "step", taskId],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    // Hook count should be the same
+    settings = JSON.parse(
+      await Bun.file(join(worktreePath, ".claude", "settings.json")).text()
+    );
+    expect(settings.hooks.Stop.length).toBe(initialHookCount);
+  });
+
+  it("tracks multiple attempts on the same step", async () => {
+    const { scriptPath } = await createMockClaude(mockDir, {
+      failOnStep: "plan",
+    });
+
+    // Create task - first attempt will fail on plan step
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test multiple attempts", "--no-start"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Run first step - will fail
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "step", taskId],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    // Check attempt-1 was created
+    const tasksDir = join(homedir(), ".cm", "tasks");
+    const attempt1File = Bun.file(
+      join(tasksDir, taskId, "steps", "plan", "attempt-1.json")
+    );
+    expect(await attempt1File.exists()).toBe(true);
   });
 });
