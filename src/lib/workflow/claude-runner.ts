@@ -41,8 +41,6 @@ export interface ClaudeRunOptions {
   model?: Model;
   /** Agent to use (path in .claude/agents/, passed via --agent flag) */
   agent?: string;
-  /** Allowed tools */
-  allowedTools?: string[];
   /** Working directory */
   cwd: string;
   /** Timeout in milliseconds */
@@ -203,7 +201,6 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     prompt,
     model,
     agent,
-    allowedTools,
     cwd,
     timeout = DEFAULT_TIMEOUT_MS,
     stepName = "step",
@@ -230,10 +227,6 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
 
   if (agent) {
     args.push("--agent", agent);
-  }
-
-  if (allowedTools && allowedTools.length > 0) {
-    args.push("--allowedTools", allowedTools.join(","));
   }
 
   if (appendSystemPrompt) {

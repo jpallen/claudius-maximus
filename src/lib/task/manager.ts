@@ -25,9 +25,14 @@ import type {
 } from "./types";
 import type { Workflow } from "../workflow/types";
 
+/** Get the base config directory (respects CM_CONFIG_DIR for testing) */
+function getConfigDir(): string {
+  return process.env.CM_CONFIG_DIR || join(homedir(), `.${CLI_NAME}`);
+}
+
 /** Directory for task storage */
 function getTasksDir(): string {
-  return join(homedir(), `.${CLI_NAME}`, "tasks");
+  return join(getConfigDir(), "tasks");
 }
 
 /** Get the index file path */

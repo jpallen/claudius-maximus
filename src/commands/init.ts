@@ -93,15 +93,6 @@ You are an execution agent responsible for implementing plans created by the pla
 const CM_YML_CONTENT = `# Claudius Maximus Workflow Configuration
 version: "1"
 
-defaults:
-  allowedTools:
-    - Read
-    - Write
-    - Edit
-    - Bash
-    - Glob
-    - Grep
-
 workflows:
   # Default workflow: plan -> review -> execute -> review
   default:

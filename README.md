@@ -29,9 +29,6 @@ Create a `cm.yml` file in your project root:
 ```yaml
 version: "1"
 
-defaults:
-  allowedTools: [Read, Write, Bash, Grep, Glob]
-
 workflows:
   default:
     steps:

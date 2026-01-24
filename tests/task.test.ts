@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { createTestContext, type TestContext } from "./helpers";
 import { join } from "path";
 import { mkdtemp, rm, chmod, mkdir } from "fs/promises";
-import { tmpdir, homedir } from "os";
+import { tmpdir } from "os";
 
 /**
  * Create a mock Claude CLI script for testing
@@ -52,9 +52,6 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --output-format)
-      shift 2
-      ;;
-    --allowedTools)
       shift 2
       ;;
     *)
@@ -118,9 +115,6 @@ async function createTestRepo(): Promise<string> {
 
   // Create a simple cm.yml
   const cmYml = `version: "1"
-
-defaults:
-  allowedTools: [Read, Write, Bash]
 
 workflows:
   default:
@@ -186,17 +180,6 @@ async function runCli(
   return { stdout, stderr, exitCode };
 }
 
-/**
- * Clean up task data from home directory
- */
-async function cleanupTaskData(): Promise<void> {
-  const tasksDir = join(homedir(), ".cm", "tasks");
-  try {
-    await rm(tasksDir, { recursive: true, force: true });
-  } catch {
-    // Ignore if doesn't exist
-  }
-}
 
 describe("task command", () => {
   let ctx: TestContext;
@@ -210,7 +193,6 @@ describe("task command", () => {
   afterEach(async () => {
     await ctx.cleanup();
     await rm(testRepoDir, { recursive: true, force: true });
-    await cleanupTaskData();
   });
 
   describe("task list", () => {
@@ -419,7 +401,6 @@ describe("task id generation", () => {
     } finally {
       await ctx.cleanup();
       await rm(testRepoDir, { recursive: true, force: true });
-      await cleanupTaskData();
     }
   });
 });
@@ -439,7 +420,6 @@ describe("workflow execution with mock Claude", () => {
     await ctx.cleanup();
     await rm(testRepoDir, { recursive: true, force: true });
     await rm(mockDir, { recursive: true, force: true });
-    await cleanupTaskData();
   });
 
   it("executes all workflow steps with mock Claude", async () => {
@@ -710,7 +690,6 @@ describe("task completion tracking", () => {
   afterEach(async () => {
     await ctx.cleanup();
     await rm(testRepoDir, { recursive: true, force: true });
-    await cleanupTaskData();
   });
 
   describe("cm task complete", () => {
@@ -775,7 +754,7 @@ describe("task completion tracking", () => {
 
     it("marks step complete when env vars are set", async () => {
       // First create a task with attempt file
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-task";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -835,7 +814,7 @@ describe("task completion tracking", () => {
     });
 
     it("marks step complete without message", async () => {
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-task-no-msg";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -888,7 +867,7 @@ describe("task completion tracking", () => {
     });
 
     it("updates task.json step status when marking complete", async () => {
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-task-status";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -963,7 +942,7 @@ describe("task completion tracking", () => {
 
     it("marks step failed when env vars are set", async () => {
       // First create a task with attempt file
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-task-fail";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -1023,7 +1002,7 @@ describe("task completion tracking", () => {
     });
 
     it("updates task.json step status when marking failed", async () => {
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-task-fail-status";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -1105,7 +1084,7 @@ describe("task completion tracking", () => {
 
     it("allows exit when step is marked complete", async () => {
       // Create task with completed attempt
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-hook-complete";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -1133,7 +1112,7 @@ describe("task completion tracking", () => {
     });
 
     it("allows exit when step is marked failed", async () => {
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-hook-failed";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -1163,7 +1142,7 @@ describe("task completion tracking", () => {
 
     it("blocks exit when step is not marked", async () => {
       // Create task with running (not completed) attempt
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-hook-block";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -1206,7 +1185,7 @@ describe("task completion tracking", () => {
     });
 
     it("outputs valid JSON when blocking", async () => {
-      const tasksDir = join(homedir(), ".cm", "tasks");
+      const tasksDir = join(ctx.configDir, "tasks");
       const taskId = "test-hook-json";
       const stepName = "test-step";
       const attemptDir = join(tasksDir, taskId, "steps", stepName);
@@ -1251,7 +1230,6 @@ describe("completion tracking integration", () => {
     await ctx.cleanup();
     await rm(testRepoDir, { recursive: true, force: true });
     await rm(mockDir, { recursive: true, force: true });
-    await cleanupTaskData();
   });
 
   /**
@@ -1339,7 +1317,7 @@ exit 0
     const taskId = match![1];
 
     // Check that attempt file was created
-    const tasksDir = join(homedir(), ".cm", "tasks");
+    const tasksDir = join(ctx.configDir, "tasks");
     const attemptFile = Bun.file(
       join(tasksDir, taskId, "steps", "execute", "attempt-1.json")
     );
@@ -1406,7 +1384,7 @@ exit 0
     // Check attempt file shows explicit completion
     const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
     const taskId = match![1];
-    const tasksDir = join(homedir(), ".cm", "tasks");
+    const tasksDir = join(ctx.configDir, "tasks");
     const attemptData = JSON.parse(
       await Bun.file(
         join(tasksDir, taskId, "steps", "execute", "attempt-1.json")
@@ -1434,7 +1412,7 @@ exit 0
     // Check attempt file shows explicit failure
     const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
     const taskId = match![1];
-    const tasksDir = join(homedir(), ".cm", "tasks");
+    const tasksDir = join(ctx.configDir, "tasks");
     const attemptData = JSON.parse(
       await Bun.file(
         join(tasksDir, taskId, "steps", "execute", "attempt-1.json")
@@ -1592,7 +1570,7 @@ exit 0
     );
 
     // Check attempt-1 was created
-    const tasksDir = join(homedir(), ".cm", "tasks");
+    const tasksDir = join(ctx.configDir, "tasks");
     const attempt1File = Bun.file(
       join(tasksDir, taskId, "steps", "plan", "attempt-1.json")
     );

@@ -27,8 +27,6 @@ export interface Workflow {
 
 /** Default settings that apply to all workflows */
 export interface WorkflowDefaults {
-  /** Default allowed tools for all steps */
-  allowedTools?: string[];
   /** Default timeout for all steps in milliseconds */
   timeout?: number;
 }
@@ -61,7 +59,6 @@ export interface RawWorkflow {
 export interface RawCmConfig {
   version?: string;
   defaults?: {
-    allowedTools?: string[];
     timeout?: number;
   };
   workflows?: Record<string, RawWorkflow>;

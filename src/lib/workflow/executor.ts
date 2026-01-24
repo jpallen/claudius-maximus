@@ -179,8 +179,6 @@ async function executeStep(
   // Setup Stop hook in the worktree
   await setupStopHook(task.worktreePath);
 
-  // Get allowed tools from config defaults
-  const allowedTools = config.defaults?.allowedTools;
   const timeout = step.timeout || config.defaults?.timeout;
 
   try {
@@ -189,7 +187,6 @@ async function executeStep(
       prompt,
       model: step.model,
       agent: step.agent,
-      allowedTools,
       cwd: task.worktreePath,
       timeout,
       stepName: step.name,

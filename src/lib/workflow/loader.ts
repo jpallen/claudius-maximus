@@ -170,15 +170,6 @@ function validateConfig(raw: RawCmConfig): CmConfig {
   if (raw.defaults) {
     config.defaults = {};
 
-    if (raw.defaults.allowedTools !== undefined) {
-      if (!Array.isArray(raw.defaults.allowedTools)) {
-        throw new ConfigValidationError(
-          "defaults.allowedTools must be an array"
-        );
-      }
-      config.defaults.allowedTools = raw.defaults.allowedTools;
-    }
-
     if (raw.defaults.timeout !== undefined) {
       if (
         typeof raw.defaults.timeout !== "number" ||
