@@ -1,6 +1,9 @@
 import { homedir } from "os";
 import { join } from "path";
-import { CONFIG_DIR_NAME, CONFIG_FILE_NAME } from "./constants";
+import { CONFIG_DIR_NAME, CONFIG_FILE_NAME, CLI_NAME } from "./constants";
+
+/** Environment variable to override config directory (useful for testing) */
+const CONFIG_DIR_ENV = `${CLI_NAME.toUpperCase()}_CONFIG_DIR`;
 
 export interface Config {
   /** Path to the dev version binary to use instead of self */
@@ -8,6 +11,11 @@ export interface Config {
 }
 
 function getConfigDir(): string {
+  // Allow override via environment variable for testing
+  const envDir = process.env[CONFIG_DIR_ENV];
+  if (envDir) {
+    return envDir;
+  }
   return join(homedir(), CONFIG_DIR_NAME);
 }
 
