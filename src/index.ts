@@ -4,6 +4,7 @@ import { APP_NAME, CLI_NAME, VERSION } from "./lib/constants";
 import { createDevCommand, maybeProxyToDevVersion } from "./commands/dev";
 import { createTaskCommand } from "./commands/task";
 import { createSystemCommand } from "./commands/system";
+import { createInitCommand } from "./commands/init";
 
 async function main() {
   // Get args without the binary path
@@ -23,6 +24,9 @@ async function main() {
     .name(CLI_NAME)
     .description(`${APP_NAME} - Your CLI companion`)
     .version(VERSION, "-v, --version", "Display version number");
+
+  // Add init command
+  program.addCommand(createInitCommand());
 
   // Add dev command
   program.addCommand(createDevCommand());
