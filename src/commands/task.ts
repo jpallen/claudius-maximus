@@ -233,9 +233,10 @@ export function createTaskCommand(): Command {
             i === t.currentStep && t.status === "running"
               ? "→"
               : statusIndicator(step.status as TaskStatus);
-          const agentInfo = step.agent ? ` [${step.agent}]` : "";
+          const modelInfo = step.model ? ` [${step.model}]` : "";
+          const agentInfo = step.agent ? ` (agent: ${step.agent})` : "";
 
-          console.log(`  ${indicator} ${i + 1}. ${step.name}${agentInfo}`);
+          console.log(`  ${indicator} ${i + 1}. ${step.name}${modelInfo}${agentInfo}`);
 
           if (step.error) {
             console.log(`     Error: ${step.error}`);

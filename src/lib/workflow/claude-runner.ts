@@ -3,7 +3,7 @@
  */
 
 import { ClaudeExecutionError, StepTimeoutError } from "../errors";
-import type { AgentModel } from "./types";
+import type { Model } from "./types";
 
 /** Default timeout: 5 minutes */
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -37,8 +37,10 @@ export type StreamCallback = (chunk: string) => void;
 export interface ClaudeRunOptions {
   /** The prompt to send */
   prompt: string;
-  /** Agent model to use */
-  agent?: AgentModel;
+  /** Model to use */
+  model?: Model;
+  /** Agent to use (path in .claude/agents/, passed via --agent flag) */
+  agent?: string;
   /** Allowed tools */
   allowedTools?: string[];
   /** Working directory */
@@ -62,10 +64,10 @@ export interface ClaudeRunOptions {
 }
 
 /**
- * Map agent model name to Claude CLI model flag
+ * Map model name to Claude CLI model flag
  */
-function mapAgentToModel(agent: AgentModel): string {
-  switch (agent) {
+function mapModelToCliFlag(model: Model): string {
+  switch (model) {
     case "opus":
       return "opus";
     case "sonnet":
@@ -78,8 +80,40 @@ function mapAgentToModel(agent: AgentModel): string {
 }
 
 /**
+ * Format a tool use event for display
+ */
+function formatToolUse(toolName: string, input: unknown): string {
+  const inputStr = typeof input === "string" ? input : JSON.stringify(input, null, 2);
+  // Truncate long inputs
+  const maxLen = 500;
+  const truncated = inputStr.length > maxLen ? inputStr.slice(0, maxLen) + "..." : inputStr;
+  return `\n── ${toolName} ──\n${truncated}\n`;
+}
+
+/**
+ * Format a tool result event for display
+ */
+function formatToolResult(content: unknown): string {
+  if (typeof content === "string") {
+    const maxLen = 1000;
+    const truncated = content.length > maxLen ? content.slice(0, maxLen) + "..." : content;
+    return `${truncated}\n────\n`;
+  }
+  if (Array.isArray(content)) {
+    // Handle content blocks (text, images, etc.)
+    return content
+      .map((block) => {
+        if (block.type === "text") return block.text;
+        return `[${block.type}]`;
+      })
+      .join("\n") + "\n────\n";
+  }
+  return JSON.stringify(content, null, 2) + "\n────\n";
+}
+
+/**
  * Process streaming JSON output from Claude CLI
- * Extracts text content from assistant messages and calls the callback
+ * Logs all events including tool usage
  */
 async function processStreamingOutput(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -112,6 +146,9 @@ async function processStreamingOutput(
             if (block.type === "text" && block.text) {
               fullOutput += block.text;
               onStream?.(block.text);
+            } else if (block.type === "tool_use") {
+              const formatted = formatToolUse(block.name, block.input);
+              onStream?.(formatted);
             }
           }
         } else if (event.type === "content_block_delta") {
@@ -119,6 +156,14 @@ async function processStreamingOutput(
           if (event.delta?.type === "text_delta" && event.delta?.text) {
             fullOutput += event.delta.text;
             onStream?.(event.delta.text);
+          }
+        } else if (event.type === "user" && event.message?.content) {
+          // Tool results come back as user messages
+          for (const block of event.message.content) {
+            if (block.type === "tool_result") {
+              const formatted = formatToolResult(block.content);
+              onStream?.(formatted);
+            }
           }
         } else if (event.type === "result") {
           // Final result
@@ -156,6 +201,7 @@ async function processStreamingOutput(
 export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult> {
   const {
     prompt,
+    model,
     agent,
     allowedTools,
     cwd,
@@ -174,8 +220,16 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
   const outputFormat = stream ? "stream-json" : "json";
   const args: string[] = [claudeCmd, "-p", prompt, "--output-format", outputFormat];
 
+  // stream-json requires --verbose when using -p
+  if (stream) {
+    args.push("--verbose");
+  }
+
+  // Default to opus if no model specified
+  args.push("--model", mapModelToCliFlag(model || "opus"));
+
   if (agent) {
-    args.push("--model", mapAgentToModel(agent));
+    args.push("--agent", agent);
   }
 
   if (allowedTools && allowedTools.length > 0) {

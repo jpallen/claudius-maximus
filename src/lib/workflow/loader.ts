@@ -12,14 +12,14 @@ import type {
   RawWorkflowStep,
   Workflow,
   WorkflowStep,
-  AgentModel,
+  Model,
 } from "./types";
 
 /** Name of the config file */
 const CONFIG_FILENAME = "cm.yml";
 
-/** Valid agent model values */
-const VALID_AGENTS: AgentModel[] = ["opus", "sonnet", "haiku"];
+/** Valid model values */
+const VALID_MODELS: Model[] = ["opus", "sonnet", "haiku"];
 
 /**
  * Find cm.yml by searching up the directory tree
@@ -58,13 +58,22 @@ function validateStep(raw: RawWorkflowStep, index: number): WorkflowStep {
     name: raw.name,
   };
 
-  if (raw.agent !== undefined) {
-    if (!VALID_AGENTS.includes(raw.agent as AgentModel)) {
+  if (raw.model !== undefined) {
+    if (!VALID_MODELS.includes(raw.model as Model)) {
       throw new ConfigValidationError(
-        `Step "${raw.name}" has invalid agent "${raw.agent}". Valid agents: ${VALID_AGENTS.join(", ")}`
+        `Step "${raw.name}" has invalid model "${raw.model}". Valid models: ${VALID_MODELS.join(", ")}`
       );
     }
-    step.agent = raw.agent as AgentModel;
+    step.model = raw.model as Model;
+  }
+
+  if (raw.agent !== undefined) {
+    if (typeof raw.agent !== "string") {
+      throw new ConfigValidationError(
+        `Step "${raw.name}" agent must be a string path`
+      );
+    }
+    step.agent = raw.agent;
   }
 
   if (raw.prompt !== undefined) {

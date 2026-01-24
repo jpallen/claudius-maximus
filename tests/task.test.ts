@@ -126,22 +126,22 @@ workflows:
   default:
     steps:
       - name: plan
-        agent: sonnet
+        model: sonnet
         prompt: "Analyze the task and create an implementation plan."
       - name: implement
-        agent: sonnet
+        model: sonnet
         prompt: "Implement the changes."
 
   quick:
     steps:
       - name: execute
-        agent: haiku
+        model: haiku
         prompt: "Execute the task quickly."
 
   needs-input:
     steps:
       - name: gather
-        # No agent or prompt - will pause for user input
+        # No model or prompt - will pause for user input
 `;
 
   await Bun.write(join(repoDir, "cm.yml"), cmYml);

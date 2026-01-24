@@ -199,6 +199,7 @@ export async function createTask(
   const steps: StepExecution[] = workflow.steps.map((step) => ({
     name: step.name,
     status: "pending",
+    model: step.model,
     agent: step.agent,
     prompt: step.prompt,
   }));

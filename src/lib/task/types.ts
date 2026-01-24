@@ -2,7 +2,7 @@
  * TypeScript interfaces for task state and management
  */
 
-import type { AgentModel } from "../workflow/types";
+import type { Model } from "../workflow/types";
 
 /** Task execution status */
 export type TaskStatus =
@@ -27,9 +27,11 @@ export interface StepExecution {
   name: string;
   /** Current status */
   status: StepStatus;
-  /** Agent model used */
-  agent?: AgentModel;
-  /** Prompt sent to agent */
+  /** Model used */
+  model?: Model;
+  /** Agent used (path in .claude/agents/) */
+  agent?: string;
+  /** Prompt sent to Claude */
   prompt?: string;
   /** Current attempt number (1-based) */
   currentAttempt?: number;

@@ -112,8 +112,8 @@ function buildStepPrompt(
     return step.prompt.replace(/\{description\}/g, task.description);
   }
 
-  // If step has an agent but no prompt, use the task description
-  if (step.agent) {
+  // If step has a model or agent but no prompt, use the task description
+  if (step.model || step.agent) {
     return task.description;
   }
 
@@ -153,10 +153,11 @@ async function executeStep(
 
   // Log step start
   if (verbose && log) {
-    const agentInfo = step.agent ? ` [${step.agent}]` : "";
+    const modelInfo = step.model ? ` [${step.model}]` : "";
+    const agentInfo = step.agent ? ` (agent: ${step.agent})` : "";
     const attemptInfo = attempt > 1 ? ` (attempt ${attempt})` : "";
     log(`\n${"─".repeat(60)}`);
-    log(`Step ${stepIndex + 1}/${totalSteps}: ${step.name}${agentInfo}${attemptInfo}`);
+    log(`Step ${stepIndex + 1}/${totalSteps}: ${step.name}${modelInfo}${agentInfo}${attemptInfo}`);
     log(`${"─".repeat(60)}\n`);
   }
 
@@ -186,6 +187,7 @@ async function executeStep(
     // Run Claude CLI with task context for completion tracking
     const result: ClaudeResult = await runClaude({
       prompt,
+      model: step.model,
       agent: step.agent,
       allowedTools,
       cwd: task.worktreePath,
@@ -207,6 +209,7 @@ async function executeStep(
     // Save step log
     await saveStepLog(task.id, stepIndex, step.name, {
       prompt,
+      model: step.model,
       agent: step.agent,
       result,
       parsed,
@@ -325,6 +328,7 @@ async function executeStep(
     // Save step log
     await saveStepLog(task.id, stepIndex, step.name, {
       prompt,
+      model: step.model,
       agent: step.agent,
       error: errorMsg,
       durationMs,

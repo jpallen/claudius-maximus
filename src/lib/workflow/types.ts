@@ -2,16 +2,18 @@
  * TypeScript interfaces for workflow configuration and execution
  */
 
-/** Agent model types */
-export type AgentModel = "opus" | "sonnet" | "haiku";
+/** Model types */
+export type Model = "opus" | "sonnet" | "haiku";
 
 /** A single step in a workflow */
 export interface WorkflowStep {
   /** Step name (used for identification and logging) */
   name: string;
-  /** Agent model to use for this step */
-  agent?: AgentModel;
-  /** Prompt to send to the agent */
+  /** Model to use for this step */
+  model?: Model;
+  /** Agent to use (path to agent in .claude/agents/, passed via --agent flag) */
+  agent?: string;
+  /** Prompt to send to Claude */
   prompt?: string;
   /** Timeout in milliseconds (default: 5 minutes) */
   timeout?: number;
@@ -44,6 +46,7 @@ export interface CmConfig {
 /** Raw YAML structure for a step (before validation) */
 export interface RawWorkflowStep {
   name?: string;
+  model?: string;
   agent?: string;
   prompt?: string;
   timeout?: number;

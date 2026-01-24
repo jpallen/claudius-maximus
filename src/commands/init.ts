@@ -107,53 +107,36 @@ workflows:
   default:
     steps:
       - name: plan
-        agent: sonnet
+        agent: planning-agent
         prompt: |
-          Read the task description and create a detailed implementation plan.
+          Create a detailed implementation plan for the following task:
 
-          Task: {description}
-
-          Follow the planning agent guidelines in .claude/agents/planning-agent.md
-
-          Output a structured plan that the execution agent can follow.
+          {description}
 
       - name: plan-review
-        agent: sonnet
+        agent: review-agent
         prompt: |
           Review the implementation plan created in the previous step.
-
-          Read .claude/agents/review-agent.md for review guidelines.
-
           If the plan needs changes, clearly specify what needs to be fixed.
           If the plan is good, approve it and summarize the key points.
 
       - name: execute
-        agent: sonnet
+        agent: execution-agent
         prompt: |
           Implement the approved plan from the planning phase.
-
-          Read .claude/agents/execution-agent.md for execution guidelines.
-
           Follow the plan step by step. Write clean, tested code.
 
       - name: review
-        agent: sonnet
+        agent: review-agent
         prompt: |
           Review the implementation completed in the previous step.
-
-          Read .claude/agents/review-agent.md for review guidelines.
-
-          Verify:
-          - All planned steps were completed
-          - Code quality meets standards
-          - Tests pass and cover the changes
-          - No obvious bugs or issues
+          Verify all planned steps were completed, code quality meets standards,
+          tests pass, and there are no obvious bugs or issues.
 
   # Quick workflow for simple tasks
   quick:
     steps:
       - name: execute
-        agent: sonnet
         prompt: |
           Complete the following task:
 
@@ -165,23 +148,18 @@ workflows:
   plan-only:
     steps:
       - name: plan
-        agent: opus
+        agent: planning-agent
         prompt: |
           Analyze the following task and create a comprehensive implementation plan:
 
           {description}
 
-          Follow the planning agent guidelines in .claude/agents/planning-agent.md
-
           Be thorough - this plan will be reviewed and executed later.
 
       - name: plan-review
-        agent: opus
+        agent: review-agent
         prompt: |
           Critically review the implementation plan.
-
-          Read .claude/agents/review-agent.md for review guidelines.
-
           Identify any gaps, risks, or improvements needed.
 `;
 
@@ -213,32 +191,48 @@ export function createInitCommand(): Command {
         const claudeDir = join(repoPath, ".claude");
         const agentsDir = join(claudeDir, "agents");
 
-        // Check if cm.yml already exists
+        // Define agent file paths
+        const agentFiles = [
+          { path: join(agentsDir, "planning-agent.md"), content: PLANNING_AGENT_PROMPT },
+          { path: join(agentsDir, "review-agent.md"), content: REVIEW_AGENT_PROMPT },
+          { path: join(agentsDir, "execution-agent.md"), content: EXECUTION_AGENT_PROMPT },
+        ];
+
+        // Check for existing files
+        const existingFiles: string[] = [];
+
         const cmYmlFile = Bun.file(cmYmlPath);
         if (await cmYmlFile.exists()) {
-          if (!options.force) {
-            console.log("cm.yml already exists. Use --force to overwrite.");
-            return;
+          existingFiles.push("cm.yml");
+        }
+
+        for (const { path } of agentFiles) {
+          const file = Bun.file(path);
+          if (await file.exists()) {
+            existingFiles.push(path.replace(repoPath + "/", ""));
           }
-          console.log("Overwriting existing cm.yml...");
+        }
+
+        if (existingFiles.length > 0 && !options.force) {
+          console.log("The following files already exist:");
+          for (const file of existingFiles) {
+            console.log(`  ${file}`);
+          }
+          console.log("\nUse --force to overwrite.");
+          return;
+        }
+
+        if (existingFiles.length > 0) {
+          console.log("Overwriting existing files...");
         }
 
         // Create directories
         await mkdir(agentsDir, { recursive: true });
 
         // Write agent configuration files
-        await Bun.write(
-          join(agentsDir, "planning-agent.md"),
-          PLANNING_AGENT_PROMPT
-        );
-        await Bun.write(
-          join(agentsDir, "review-agent.md"),
-          REVIEW_AGENT_PROMPT
-        );
-        await Bun.write(
-          join(agentsDir, "execution-agent.md"),
-          EXECUTION_AGENT_PROMPT
-        );
+        for (const { path, content } of agentFiles) {
+          await Bun.write(path, content);
+        }
 
         // Write cm.yml
         await Bun.write(cmYmlPath, CM_YML_CONTENT);

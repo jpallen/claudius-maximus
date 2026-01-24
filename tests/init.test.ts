@@ -131,7 +131,7 @@ describe("cm init", () => {
     const result = await runCli(testRepoDir, ["init"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("already exists");
+    expect(result.stdout).toContain("already exist");
     expect(result.stdout).toContain("--force");
 
     // Verify file was not overwritten
