@@ -24,6 +24,9 @@ import type {
   StepExecution,
   StepAttempt,
   CreateTaskOptions,
+  TaskThread,
+  ThreadEntry,
+  ThreadEntryType,
 } from "./types";
 import type { Workflow } from "../workflow/types";
 
@@ -71,6 +74,11 @@ function getStepDir(taskId: string, stepName: string): string {
 /** Get the attempt file path */
 function getAttemptPath(taskId: string, stepName: string, attempt: number): string {
   return join(getStepDir(taskId, stepName), `attempt-${attempt}.json`);
+}
+
+/** Get the thread file path */
+function getThreadPath(taskId: string): string {
+  return join(getTaskDir(taskId), "thread.json");
 }
 
 /**
@@ -532,4 +540,80 @@ export async function markStepFailed(
     task.steps[stepIndex].status = "failed";
     await saveTask(task);
   }
+}
+
+/**
+ * Create an empty task thread
+ */
+function createEmptyThread(): TaskThread {
+  const now = new Date().toISOString();
+  return {
+    entries: [],
+    metadata: {
+      createdAt: now,
+      updatedAt: now,
+      totalCharacters: 0,
+    },
+  };
+}
+
+/**
+ * Generate a unique thread entry ID
+ */
+function generateEntryId(): string {
+  return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+}
+
+/**
+ * Load a task thread from disk
+ */
+export async function loadThread(taskId: string): Promise<TaskThread> {
+  const threadPath = getThreadPath(taskId);
+  const file = Bun.file(threadPath);
+
+  if (await file.exists()) {
+    try {
+      const content = await file.text();
+      return JSON.parse(content) as TaskThread;
+    } catch {
+      return createEmptyThread();
+    }
+  }
+
+  return createEmptyThread();
+}
+
+/**
+ * Save a task thread to disk
+ */
+export async function saveThread(taskId: string, thread: TaskThread): Promise<void> {
+  const taskDir = getTaskDir(taskId);
+  await mkdir(taskDir, { recursive: true });
+
+  const threadPath = getThreadPath(taskId);
+  await Bun.write(threadPath, JSON.stringify(thread, null, 2));
+}
+
+/**
+ * Append a thread entry and update metadata
+ */
+export async function appendThreadEntry(
+  taskId: string,
+  entry: Omit<ThreadEntry, "id" | "timestamp">
+): Promise<ThreadEntry> {
+  const thread = await loadThread(taskId);
+
+  const fullEntry: ThreadEntry = {
+    ...entry,
+    id: generateEntryId(),
+    timestamp: new Date().toISOString(),
+  };
+
+  thread.entries.push(fullEntry);
+  thread.metadata.updatedAt = fullEntry.timestamp;
+  thread.metadata.totalCharacters += entry.content.length;
+
+  await saveThread(taskId, thread);
+
+  return fullEntry;
 }

@@ -126,3 +126,44 @@ export interface CreateTaskOptions {
   /** Base branch to create task from (default: current branch) */
   baseBranch?: string;
 }
+
+/** Types of entries in a task thread */
+export type ThreadEntryType =
+  | "step_prompt"      // Prompt sent to Claude
+  | "claude_response"  // Claude's output/completion message
+  | "user_question"    // AskUserQuestion question
+  | "user_answer"      // User's answer
+  | "resume_prompt";   // User resume input
+
+/** A single entry in the task thread */
+export interface ThreadEntry {
+  /** Unique entry ID */
+  id: string;
+  /** Type of entry */
+  type: ThreadEntryType;
+  /** ISO timestamp when entry was created */
+  timestamp: string;
+  /** Name of the step this entry belongs to */
+  stepName: string;
+  /** Attempt number (1-based) */
+  attemptNumber: number;
+  /** Primary content of the entry */
+  content: string;
+  /** Type-specific metadata (options, success, etc.) */
+  metadata?: Record<string, unknown>;
+}
+
+/** Task thread containing all entries */
+export interface TaskThread {
+  /** All thread entries */
+  entries: ThreadEntry[];
+  /** Thread metadata */
+  metadata: {
+    /** When thread was created */
+    createdAt: string;
+    /** When thread was last updated */
+    updatedAt: string;
+    /** Total character count of all content */
+    totalCharacters: number;
+  };
+}

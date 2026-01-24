@@ -33,6 +33,13 @@ export interface ClaudeResult {
 /** Callback for streaming output */
 export type StreamCallback = (chunk: string) => void;
 
+/** Callback for AskUserQuestion events */
+export type QuestionAnswerCallback = (
+  question: string,
+  answer: string,
+  stepName: string
+) => void;
+
 /** Options for running Claude CLI */
 export interface ClaudeRunOptions {
   /** The prompt to send */
@@ -59,6 +66,8 @@ export interface ClaudeRunOptions {
   stream?: boolean;
   /** Callback for streaming output (called with each text chunk) */
   onStream?: StreamCallback;
+  /** Callback for AskUserQuestion Q&A pairs */
+  onQuestionAnswer?: QuestionAnswerCallback;
 }
 
 /**
@@ -228,13 +237,21 @@ function formatToolOutput(
   }
 }
 
+/** Tracked question info for matching with answers */
+interface TrackedQuestion {
+  toolUseId: string;
+  question: string;
+}
+
 /**
  * Process streaming JSON output from Claude CLI
  * Logs all events including tool usage with tool-specific formatting
  */
 async function processStreamingOutput(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  onStream?: StreamCallback
+  stepName: string,
+  onStream?: StreamCallback,
+  onQuestionAnswer?: QuestionAnswerCallback
 ): Promise<string> {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -242,6 +259,8 @@ async function processStreamingOutput(
 
   // Track tool names by their ID to match results with their tool
   const toolNames = new Map<string, string>();
+  // Track AskUserQuestion questions by tool_use_id for Q&A matching
+  const pendingQuestions = new Map<string, TrackedQuestion>();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -271,6 +290,20 @@ async function processStreamingOutput(
               if (block.id) {
                 toolNames.set(block.id, block.name);
               }
+
+              // Track AskUserQuestion questions for Q&A callback
+              if (block.name === "AskUserQuestion" && block.id && onQuestionAnswer) {
+                const questions = block.input?.questions as Array<{ question: string }> | undefined;
+                if (questions?.length) {
+                  // Combine multiple questions into one string
+                  const questionText = questions.map((q) => q.question).join(" | ");
+                  pendingQuestions.set(block.id, {
+                    toolUseId: block.id,
+                    question: questionText,
+                  });
+                }
+              }
+
               const formatted = formatToolInput(block.name, block.input || {});
               onStream?.(formatted);
             }
@@ -287,6 +320,20 @@ async function processStreamingOutput(
             if (block.type === "tool_result") {
               // Look up tool name by ID
               const toolName = block.tool_use_id ? toolNames.get(block.tool_use_id) : undefined;
+
+              // Check for AskUserQuestion answer
+              if (toolName === "AskUserQuestion" && block.tool_use_id && onQuestionAnswer) {
+                const pending = pendingQuestions.get(block.tool_use_id);
+                if (pending) {
+                  // Extract answer from content
+                  const answer = extractAnswerFromContent(block.content);
+                  if (answer) {
+                    onQuestionAnswer(pending.question, answer, stepName);
+                  }
+                  pendingQuestions.delete(block.tool_use_id);
+                }
+              }
+
               const formatted = formatToolOutput(
                 toolName || "unknown",
                 block.content,
@@ -326,6 +373,30 @@ async function processStreamingOutput(
 }
 
 /**
+ * Extract answer text from tool_result content
+ */
+function extractAnswerFromContent(content: unknown): string | null {
+  if (typeof content === "string") {
+    // Parse format: 'User has answered your questions: "question"="answer"...'
+    const matches = content.matchAll(/"[^"]+?"="([^"]+?)"/g);
+    const answers = [...matches].map((m) => m[1]);
+    if (answers.length > 0) {
+      return answers.join(", ");
+    }
+    // If no matches, return the whole content (might be a simple answer)
+    return content;
+  }
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block.type === "text" && block.text) {
+        return block.text;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Run Claude CLI with the given options
  */
 export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult> {
@@ -342,6 +413,7 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     taskStepAttempt,
     stream = false,
     onStream,
+    onQuestionAnswer,
   } = options;
 
   // Build command arguments
@@ -409,7 +481,7 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
       const reader = proc.stdout.getReader();
       const [streamedOutput, stderrOutput] = await Promise.race([
         Promise.all([
-          processStreamingOutput(reader, onStream),
+          processStreamingOutput(reader, stepName, onStream, onQuestionAnswer),
           new Response(proc.stderr).text(),
         ]),
         timeoutPromise,

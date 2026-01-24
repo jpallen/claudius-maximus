@@ -441,7 +441,8 @@ describe("workflow execution with mock Claude", () => {
     // Verify Claude was called for each step
     const log = await readMockLog(logPath);
     expect(log).toContain("PROMPT: Analyze the task");
-    expect(log).toContain("PROMPT: Implement the changes");
+    // Second step has thread context prepended, so check the base prompt content
+    expect(log).toContain("Implement the changes");
     expect(log).toContain("MODEL: sonnet");
   });
 
@@ -505,9 +506,9 @@ describe("workflow execution with mock Claude", () => {
     expect(step2Result.exitCode).toBe(0);
     expect(step2Result.stdout).toContain("Task completed");
 
-    // Check log has second step
+    // Check log has second step (with thread context prepended)
     log = await readMockLog(logPath);
-    expect(log).toContain("PROMPT: Implement the changes");
+    expect(log).toContain("Implement the changes");
   });
 
   it("runs remaining steps with task run command", async () => {
@@ -538,7 +539,8 @@ describe("workflow execution with mock Claude", () => {
     // Check both steps were executed
     const log = await readMockLog(logPath);
     expect(log).toContain("PROMPT: Analyze the task");
-    expect(log).toContain("PROMPT: Implement the changes");
+    // Second step has thread context prepended
+    expect(log).toContain("Implement the changes");
   });
 
   it("handles step failure correctly", async () => {
@@ -612,9 +614,9 @@ describe("workflow execution with mock Claude", () => {
     expect(resumeResult.exitCode).toBe(0);
     expect(resumeResult.stdout).toContain("Workflow completed");
 
-    // Check that Claude was called with user's prompt
+    // Check that Claude was called with user's prompt (may have thread context)
     const log = await readMockLog(logPath);
-    expect(log).toContain("PROMPT: User provided this input");
+    expect(log).toContain("User provided this input");
   });
 
   it("updates task status throughout execution", async () => {
@@ -1789,5 +1791,178 @@ describe("branch management", () => {
       expect(statusResult.exitCode).toBe(1);
       expect(statusResult.stderr).toContain("not found");
     });
+  });
+});
+
+describe("task thread", () => {
+  let ctx: TestContext;
+  let testRepoDir: string;
+  let mockDir: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    testRepoDir = await createTestRepo();
+    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-"));
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+    await rm(testRepoDir, { recursive: true, force: true });
+    await rm(mockDir, { recursive: true, force: true });
+  });
+
+  it("creates thread file during task execution", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test thread creation", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(result.exitCode).toBe(0);
+
+    // Extract task ID
+    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Check thread file exists
+    const tasksDir = join(ctx.configDir, "tasks");
+    const threadFile = Bun.file(join(tasksDir, taskId, "thread.json"));
+    expect(await threadFile.exists()).toBe(true);
+
+    // Verify thread structure
+    const thread = JSON.parse(await threadFile.text());
+    expect(thread.entries).toBeDefined();
+    expect(Array.isArray(thread.entries)).toBe(true);
+    expect(thread.entries.length).toBeGreaterThan(0);
+    expect(thread.metadata).toBeDefined();
+    expect(thread.metadata.totalCharacters).toBeGreaterThan(0);
+  });
+
+  it("captures step prompts in thread", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test prompt capture"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(result.exitCode).toBe(0);
+
+    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    const tasksDir = join(ctx.configDir, "tasks");
+    const thread = JSON.parse(
+      await Bun.file(join(tasksDir, taskId, "thread.json")).text()
+    );
+
+    // Find step_prompt entries
+    const prompts = thread.entries.filter(
+      (e: { type: string }) => e.type === "step_prompt"
+    );
+    expect(prompts.length).toBeGreaterThan(0);
+
+    // First prompt should be from plan step
+    expect(prompts[0].stepName).toBe("plan");
+    expect(prompts[0].content).toContain("Analyze the task");
+  });
+
+  it("captures response in thread", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test response capture", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(result.exitCode).toBe(0);
+
+    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    const tasksDir = join(ctx.configDir, "tasks");
+    const thread = JSON.parse(
+      await Bun.file(join(tasksDir, taskId, "thread.json")).text()
+    );
+
+    // Find claude_response entries
+    const responses = thread.entries.filter(
+      (e: { type: string }) => e.type === "claude_response"
+    );
+    expect(responses.length).toBeGreaterThan(0);
+  });
+
+  it("shows thread with cm task thread command", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test thread view", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(createResult.exitCode).toBe(0);
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // View the thread
+    const threadResult = await runCli(ctx, testRepoDir, ["task", "thread", taskId]);
+    expect(threadResult.exitCode).toBe(0);
+    expect(threadResult.stdout).toContain("Step: execute");
+    expect(threadResult.stdout).toContain("Prompt:");
+    expect(threadResult.stdout).toContain("Total entries:");
+  });
+
+  it("supports --json flag for thread output", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test JSON thread", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // View thread as JSON
+    const threadResult = await runCli(ctx, testRepoDir, [
+      "task",
+      "thread",
+      taskId,
+      "--json",
+    ]);
+    expect(threadResult.exitCode).toBe(0);
+
+    // Should be valid JSON
+    const parsed = JSON.parse(threadResult.stdout);
+    expect(parsed.entries).toBeDefined();
+    expect(parsed.metadata).toBeDefined();
+  });
+
+  it("injects thread context into follow-on steps", async () => {
+    const { scriptPath, logPath } = await createMockClaude(mockDir);
+
+    await runCli(ctx, testRepoDir, ["task", "create", "Test context injection"], {
+      CM_CLAUDE_COMMAND: scriptPath,
+    });
+
+    // Check the Claude call log
+    const log = await readMockLog(logPath);
+
+    // The second step (implement) should receive context from the first step (plan)
+    expect(log).toContain("<previous-steps>");
+    expect(log).toContain("</previous-steps>");
+    expect(log).toContain('<step name="plan"');
   });
 });

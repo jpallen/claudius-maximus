@@ -16,7 +16,10 @@ import {
   loadTask,
   saveAttempt,
   loadAttempt,
+  loadThread,
+  appendThreadEntry,
 } from "../task/manager";
+import { formatThreadForContext } from "../task/thread-formatter";
 import { setupStopHook } from "../task/hooks";
 import { StepTimeoutError, ClaudeExecutionError } from "../errors";
 
@@ -136,20 +139,44 @@ async function executeStep(
   const { stream, verbose, log, streamOutput } = options;
   const startTime = Date.now();
 
-  // Build the prompt
-  const prompt = buildStepPrompt(step, task, isResuming);
+  // Determine attempt number early so we can use it for thread entries
+  const currentStep = task.steps[stepIndex];
+  const attempt = (currentStep.currentAttempt || 0) + 1;
+
+  // Capture resume prompt entry if resuming with a user prompt
+  if (isResuming && task.resumePrompt) {
+    await appendThreadEntry(task.id, {
+      type: "resume_prompt",
+      stepName: step.name,
+      attemptNumber: attempt,
+      content: task.resumePrompt,
+    });
+  }
+
+  // Build the base prompt
+  const basePrompt = buildStepPrompt(step, task, isResuming);
 
   // If no prompt can be built, pause for user input
-  if (!prompt) {
+  if (!basePrompt) {
     return {
       success: true,
       shouldPause: true,
     };
   }
 
-  // Determine attempt number
-  const currentStep = task.steps[stepIndex];
-  const attempt = (currentStep.currentAttempt || 0) + 1;
+  // Load thread and build prompt with context
+  const thread = await loadThread(task.id);
+  const threadContext = formatThreadForContext(thread);
+  const prompt = threadContext ? `${threadContext}\n\n${basePrompt}` : basePrompt;
+
+  // Capture the step prompt entry (using basePrompt to avoid duplicating context)
+  await appendThreadEntry(task.id, {
+    type: "step_prompt",
+    stepName: step.name,
+    attemptNumber: attempt,
+    content: basePrompt,
+    metadata: { model: step.model },
+  });
 
   // Log step start
   if (verbose && log) {
@@ -181,6 +208,22 @@ async function executeStep(
 
   const timeout = step.timeout || config.defaults?.timeout;
 
+  // Create callback for Q&A capture
+  const onQuestionAnswer = async (question: string, answer: string, stepName: string) => {
+    await appendThreadEntry(task.id, {
+      type: "user_question",
+      stepName,
+      attemptNumber: attempt,
+      content: question,
+    });
+    await appendThreadEntry(task.id, {
+      type: "user_answer",
+      stepName,
+      attemptNumber: attempt,
+      content: answer,
+    });
+  };
+
   try {
     // Run Claude CLI with task context for completion tracking
     const result: ClaudeResult = await runClaude({
@@ -196,6 +239,7 @@ async function executeStep(
       taskStepAttempt: attempt,
       stream: stream,
       onStream: streamOutput,
+      onQuestionAnswer,
     });
 
     const durationMs = Date.now() - startTime;
@@ -230,6 +274,15 @@ async function executeStep(
 
     // Check if step was explicitly marked
     if (updatedAttempt.explicitlyFailed) {
+      // Capture failed response in thread
+      await appendThreadEntry(task.id, {
+        type: "claude_response",
+        stepName: step.name,
+        attemptNumber: attempt,
+        content: updatedAttempt.error || "Step failed",
+        metadata: { success: false, explicitlyFailed: true },
+      });
+
       await updateStepStatus(task.id, stepIndex, {
         status: "failed",
         completedAt: new Date().toISOString(),
@@ -249,10 +302,21 @@ async function executeStep(
     }
 
     if (updatedAttempt.explicitlyCompleted) {
+      const responseContent = updatedAttempt.completionMessage || parsed.result || "";
+
+      // Capture successful response in thread
+      await appendThreadEntry(task.id, {
+        type: "claude_response",
+        stepName: step.name,
+        attemptNumber: attempt,
+        content: responseContent,
+        metadata: { success: true, explicitlyCompleted: true },
+      });
+
       await updateStepStatus(task.id, stepIndex, {
         status: "completed",
         completedAt: new Date().toISOString(),
-        output: updatedAttempt.completionMessage || parsed.result,
+        output: responseContent,
       });
 
       if (verbose && log) {
@@ -262,18 +326,29 @@ async function executeStep(
       return {
         success: true,
         shouldPause: false,
-        output: updatedAttempt.completionMessage || parsed.result,
+        output: responseContent,
         durationMs,
       };
     }
 
     // Fallback to exit code based success/failure (for backwards compatibility)
     if (result.success) {
+      const responseContent = parsed.result || "";
+
+      // Capture successful response in thread
+      await appendThreadEntry(task.id, {
+        type: "claude_response",
+        stepName: step.name,
+        attemptNumber: attempt,
+        content: responseContent,
+        metadata: { success: true },
+      });
+
       // Mark step as completed
       await updateStepStatus(task.id, stepIndex, {
         status: "completed",
         completedAt: new Date().toISOString(),
-        output: parsed.result,
+        output: responseContent,
       });
 
       if (verbose && log) {
@@ -283,12 +358,22 @@ async function executeStep(
       return {
         success: true,
         shouldPause: false,
-        output: parsed.result,
+        output: responseContent,
         durationMs,
       };
     } else {
       // Mark step as failed
       const errorMsg = result.stderr || `Exit code ${result.exitCode}`;
+
+      // Capture failed response in thread
+      await appendThreadEntry(task.id, {
+        type: "claude_response",
+        stepName: step.name,
+        attemptNumber: attempt,
+        content: errorMsg,
+        metadata: { success: false, exitCode: result.exitCode },
+      });
+
       await updateStepStatus(task.id, stepIndex, {
         status: "failed",
         completedAt: new Date().toISOString(),

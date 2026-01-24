@@ -14,7 +14,9 @@ import {
   resumeTask,
   markStepComplete,
   markStepFailed,
+  loadThread,
 } from "../lib/task/manager";
+import { formatThreadForDisplay } from "../lib/task/thread-formatter";
 import { findAndLoadConfig, getWorkflow } from "../lib/workflow/loader";
 import {
   executeWorkflow,
@@ -602,6 +604,32 @@ export function createTaskCommand(): Command {
         } else {
           console.log(`\nMerge failed: ${result.error}`);
         }
+      } catch (error) {
+        handleError(error);
+      }
+    });
+
+  // cm task thread <id> [--json] [--step <name>] [--last <n>]
+  task
+    .command("thread <id>")
+    .description("View the task's thread (prompts, responses, Q&A)")
+    .option("--json", "Output as JSON")
+    .option("-s, --step <name>", "Filter to specific step")
+    .option("-l, --last <n>", "Show only the last N entries", parseInt)
+    .action(async (taskId: string, options) => {
+      try {
+        // Verify task exists
+        await getTask(taskId);
+
+        // Load and format thread
+        const thread = await loadThread(taskId);
+        const output = formatThreadForDisplay(thread, {
+          stepFilter: options.step,
+          lastN: options.last,
+          json: options.json,
+        });
+
+        console.log(output);
       } catch (error) {
         handleError(error);
       }
