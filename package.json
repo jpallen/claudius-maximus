@@ -1,0 +1,25 @@
+{
+  "name": "claudius-maximus",
+  "version": "0.1.0",
+  "description": "Claudius Maximus CLI",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "cm": "src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --compile --outfile dist/cm",
+    "build:linux": "bun build src/index.ts --compile --target=bun-linux-x64 --outfile dist/cm-linux",
+    "build:macos": "bun build src/index.ts --compile --target=bun-darwin-x64 --outfile dist/cm-macos",
+    "build:windows": "bun build src/index.ts --compile --target=bun-windows-x64 --outfile dist/cm.exe",
+    "build:all": "bun run build:linux && bun run build:macos && bun run build:windows"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}
