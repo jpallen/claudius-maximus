@@ -18,7 +18,8 @@
     "build:all": "bun run build:linux && bun run build:macos && bun run build:windows"
   },
   "dependencies": {
-    "commander": "^12.1.0"
+    "commander": "^12.1.0",
+    "yaml": "^2.6.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
