@@ -78,40 +78,159 @@ function mapModelToCliFlag(model: Model): string {
 }
 
 /**
- * Format a tool use event for display
+ * Format tool input for display (tool-specific formatting)
  */
-function formatToolUse(toolName: string, input: unknown): string {
-  const inputStr = typeof input === "string" ? input : JSON.stringify(input, null, 2);
-  // Truncate long inputs
-  const maxLen = 500;
-  const truncated = inputStr.length > maxLen ? inputStr.slice(0, maxLen) + "..." : inputStr;
-  return `\n── ${toolName} ──\n${truncated}\n`;
+function formatToolInput(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case "Bash": {
+      const desc = input.description ? `# ${input.description}\n` : "";
+      return `\n${desc}$ ${input.command}\n`;
+    }
+
+    case "Read":
+      return `\nRead: ${input.file_path}\n`;
+
+    case "Glob":
+      return `\nGlob: ${input.pattern}${input.path ? ` in ${input.path}` : ""}\n`;
+
+    case "Grep":
+      return `\nGrep: "${input.pattern}"${input.path ? ` in ${input.path}` : ""}\n`;
+
+    case "Edit":
+      return `\nEdit: ${input.file_path}\n`;
+
+    case "Write":
+      return `\nWrite: ${input.file_path}\n`;
+
+    case "Task":
+      return `\nTask: ${input.description || "agent"}\n`;
+
+    case "AskUserQuestion": {
+      const questions = input.questions as Array<{
+        question: string;
+        header?: string;
+        options?: Array<{ label: string; description?: string }>;
+        multiSelect?: boolean;
+      }>;
+      if (!questions?.length) return "\n? (asking user)\n";
+
+      let output = "\n";
+      for (const q of questions) {
+        output += `? ${q.question}\n`;
+        if (q.options?.length) {
+          for (const opt of q.options) {
+            output += `  - ${opt.label}\n`;
+          }
+        }
+      }
+      return output;
+    }
+
+    default:
+      return `\n-- ${toolName} --\n`;
+  }
 }
 
 /**
- * Format a tool result event for display
+ * Format generic result content (fallback for unhandled tools)
  */
-function formatToolResult(content: unknown): string {
+function formatGenericResult(content: unknown): string {
   if (typeof content === "string") {
-    const maxLen = 1000;
+    const maxLen = 500;
     const truncated = content.length > maxLen ? content.slice(0, maxLen) + "..." : content;
-    return `${truncated}\n────\n`;
+    return `${truncated}\n`;
   }
   if (Array.isArray(content)) {
-    // Handle content blocks (text, images, etc.)
     return content
       .map((block) => {
         if (block.type === "text") return block.text;
         return `[${block.type}]`;
       })
-      .join("\n") + "\n────\n";
+      .join("\n") + "\n";
   }
-  return JSON.stringify(content, null, 2) + "\n────\n";
+  return "";
+}
+
+/**
+ * Format tool output for display (tool-specific formatting)
+ */
+function formatToolOutput(
+  toolName: string,
+  content: unknown,
+  toolUseResult?: Record<string, unknown>
+): string {
+  switch (toolName) {
+    case "Bash":
+      // Use rich metadata if available
+      if (toolUseResult) {
+        let output = "";
+        if (toolUseResult.stdout) output += toolUseResult.stdout;
+        if (toolUseResult.stderr) output += toolUseResult.stderr;
+        return output ? `${String(output).trimEnd()}\n` : "";
+      }
+      return formatGenericResult(content);
+
+    case "Read":
+      // Don't show file contents, just acknowledge
+      if (toolUseResult && typeof toolUseResult.numLines === "number") {
+        return `(${toolUseResult.numLines} lines)\n`;
+      }
+      return "(file read)\n";
+
+    case "Glob":
+      if (toolUseResult && typeof toolUseResult.numFiles === "number") {
+        return `Found ${toolUseResult.numFiles} files\n`;
+      }
+      return formatGenericResult(content);
+
+    case "Grep":
+      // Show match count
+      if (typeof content === "string") {
+        const lines = content.split("\n").filter(Boolean);
+        return `Found ${lines.length} matches\n`;
+      }
+      return formatGenericResult(content);
+
+    case "Edit":
+    case "Write":
+      return "done\n";
+
+    case "Task":
+      return "(agent completed)\n";
+
+    case "AskUserQuestion": {
+      // Parse the answer from content like:
+      // 'User has answered your questions: "question"="answer". You can now continue...'
+      if (typeof content === "string") {
+        // Extract answer(s) from the format: "question"="answer"
+        const matches = content.matchAll(/"[^"]+?"="([^"]+?)"/g);
+        const answers = [...matches].map((m) => m[1]);
+        if (answers.length > 0) {
+          return `> ${answers.join(", ")}\n`;
+        }
+        // Fallback: show abbreviated content
+        const maxLen = 100;
+        const truncated = content.length > maxLen ? content.slice(0, maxLen) + "..." : content;
+        return `> ${truncated}\n`;
+      }
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === "text" && block.text) {
+            return `> ${block.text}\n`;
+          }
+        }
+      }
+      return "(answered)\n";
+    }
+
+    default:
+      return formatGenericResult(content);
+  }
 }
 
 /**
  * Process streaming JSON output from Claude CLI
- * Logs all events including tool usage
+ * Logs all events including tool usage with tool-specific formatting
  */
 async function processStreamingOutput(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -120,6 +239,9 @@ async function processStreamingOutput(
   const decoder = new TextDecoder();
   let buffer = "";
   let fullOutput = "";
+
+  // Track tool names by their ID to match results with their tool
+  const toolNames = new Map<string, string>();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -145,7 +267,11 @@ async function processStreamingOutput(
               fullOutput += block.text;
               onStream?.(block.text);
             } else if (block.type === "tool_use") {
-              const formatted = formatToolUse(block.name, block.input);
+              // Track tool name by ID for later result matching
+              if (block.id) {
+                toolNames.set(block.id, block.name);
+              }
+              const formatted = formatToolInput(block.name, block.input || {});
               onStream?.(formatted);
             }
           }
@@ -159,7 +285,13 @@ async function processStreamingOutput(
           // Tool results come back as user messages
           for (const block of event.message.content) {
             if (block.type === "tool_result") {
-              const formatted = formatToolResult(block.content);
+              // Look up tool name by ID
+              const toolName = block.tool_use_id ? toolNames.get(block.tool_use_id) : undefined;
+              const formatted = formatToolOutput(
+                toolName || "unknown",
+                block.content,
+                block.tool_use_result as Record<string, unknown> | undefined
+              );
               onStream?.(formatted);
             }
           }
