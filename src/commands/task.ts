@@ -3,6 +3,7 @@
  */
 
 import { Command } from "commander";
+import * as readline from "readline";
 import {
   createTask,
   listTasks,
@@ -20,7 +21,13 @@ import {
   executeNextStep,
   type ExecutionOptions,
 } from "../lib/workflow/executor";
-import { findGitRoot } from "../lib/task/worktree";
+import {
+  findGitRoot,
+  hasCommitsToMerge,
+  getTaskCommitSummary,
+  mergeTaskBranch,
+  removeWorktree,
+} from "../lib/task/worktree";
 import {
   CmError,
   ConfigNotFoundError,
@@ -65,16 +72,85 @@ function handleError(error: unknown): never {
   process.exit(1);
 }
 
+/** Prompt user for input */
+async function promptUser(question: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase().trim());
+    });
+  });
+}
+
+/** Check if running in interactive mode */
+function isInteractive(): boolean {
+  return process.stdin.isTTY === true;
+}
+
+/** Handle merge prompt after task completion */
+async function handleMergePrompt(
+  taskId: string,
+  repoPath: string,
+  baseBranch: string
+): Promise<void> {
+  // Check if there are commits to merge
+  const hasCommits = await hasCommitsToMerge(repoPath, taskId, baseBranch);
+  if (!hasCommits) {
+    console.log(`\nNo commits to merge to ${baseBranch}.`);
+    return;
+  }
+
+  // Get commit summary
+  const commits = await getTaskCommitSummary(repoPath, taskId, baseBranch);
+  console.log(`\nTask completed with ${commits.length} commit(s):`);
+  for (const commit of commits) {
+    console.log(`  ${commit.hash} ${commit.subject}`);
+  }
+
+  // Skip prompt if not interactive
+  if (!isInteractive()) {
+    console.log(`\nRun 'cm task merge ${taskId}' to merge to ${baseBranch}.`);
+    return;
+  }
+
+  console.log(`\nWhat would you like to do?`);
+  console.log(`  [m] Merge to ${baseBranch}`);
+  console.log(`  [s] Skip (keep branch for later)`);
+
+  const answer = await promptUser("Choice [m/s]: ");
+
+  if (answer === "m") {
+    const result = await mergeTaskBranch(repoPath, taskId, baseBranch);
+    if (result.success) {
+      console.log(`\nMerged to ${baseBranch} successfully.`);
+      console.log(`You can now delete the task with: cm task delete ${taskId}`);
+    } else if (result.conflicted) {
+      console.log(`\n${result.error}`);
+      console.log(`Resolve conflicts manually and then delete the task.`);
+    } else {
+      console.log(`\nMerge failed: ${result.error}`);
+    }
+  } else {
+    console.log(`\nSkipped. Merge later with: cm task merge ${taskId}`);
+  }
+}
+
 export function createTaskCommand(): Command {
   const task = new Command("task").description(
     "Manage workflow tasks with git worktrees"
   );
 
-  // cm task create "description" [--workflow <name>] [--no-start] [--quiet]
+  // cm task create "description" [--workflow <name>] [--branch <name>] [--no-start] [--quiet]
   task
     .command("create <description>")
     .description("Create a new task and optionally run it")
     .option("-w, --workflow <name>", "Workflow to use", "default")
+    .option("-b, --branch <name>", "Base branch to create task from")
     .option("--no-start", "Create task without starting execution")
     .option("-q, --quiet", "Suppress streaming output")
     .action(async (description: string, options) => {
@@ -96,12 +172,13 @@ export function createTaskCommand(): Command {
         const newTask = await createTask(
           workflow,
           workflowName,
-          { description },
+          { description, baseBranch: options.branch },
           repoPath
         );
 
         console.log(`Task created: ${newTask.id}`);
         console.log(`Worktree: ${newTask.worktreePath}`);
+        console.log(`Base branch: ${newTask.baseBranch}`);
 
         // Start execution if requested
         if (options.start !== false) {
@@ -126,6 +203,9 @@ export function createTaskCommand(): Command {
             );
           } else if (result.status === "failed") {
             console.log(`\nWorkflow failed: ${result.error}`);
+          } else if (result.status === "completed") {
+            // Prompt for merge
+            await handleMergePrompt(newTask.id, repoPath, newTask.baseBranch);
           }
         } else {
           console.log(`\nTask created but not started.`);
@@ -212,6 +292,7 @@ export function createTaskCommand(): Command {
         console.log(`Status: ${t.status}`);
         console.log(`Description: ${t.description}`);
         console.log(`Workflow: ${t.workflow}`);
+        console.log(`Base branch: ${t.baseBranch}`);
         console.log(`Worktree: ${t.worktreePath}`);
         console.log(`Created: ${formatDate(t.createdAt)}`);
 
@@ -294,6 +375,10 @@ export function createTaskCommand(): Command {
           );
         } else if (result.status === "failed") {
           console.log(`\nWorkflow failed: ${result.error}`);
+        } else if (result.status === "completed") {
+          // Reload task to get baseBranch
+          const completedTask = await getTask(taskId);
+          await handleMergePrompt(taskId, completedTask.repoPath, completedTask.baseBranch);
         }
       } catch (error) {
         handleError(error);
@@ -411,6 +496,10 @@ export function createTaskCommand(): Command {
           );
         } else if (result.status === "failed") {
           console.log(`\nWorkflow failed: ${result.error}`);
+        } else if (result.status === "completed") {
+          // Reload task to get baseBranch
+          const completedTask = await getTask(taskId);
+          await handleMergePrompt(taskId, completedTask.repoPath, completedTask.baseBranch);
         }
       } catch (error) {
         handleError(error);
@@ -451,6 +540,68 @@ export function createTaskCommand(): Command {
         await deleteTask(taskId);
         console.log(`Task ${taskId} deleted.`);
         console.log(`Worktree and branch removed.`);
+      } catch (error) {
+        handleError(error);
+      }
+    });
+
+  // cm task merge <id>
+  task
+    .command("merge <id>")
+    .description("Merge a completed task's branch into its base branch")
+    .option("-d, --delete", "Delete the task after successful merge")
+    .action(async (taskId: string, options) => {
+      try {
+        const t = await getTask(taskId);
+
+        if (t.status !== "completed") {
+          console.log(
+            `Task ${taskId} is not completed (status: ${t.status}).`
+          );
+          console.log(`Only completed tasks can be merged.`);
+          return;
+        }
+
+        // Check if there are commits to merge
+        const hasCommits = await hasCommitsToMerge(t.repoPath, taskId, t.baseBranch);
+        if (!hasCommits) {
+          console.log(`No commits to merge to ${t.baseBranch}.`);
+          if (options.delete) {
+            await deleteTask(taskId);
+            console.log(`Task ${taskId} deleted.`);
+          }
+          return;
+        }
+
+        // Get commit summary
+        const commits = await getTaskCommitSummary(t.repoPath, taskId, t.baseBranch);
+        console.log(`Merging ${commits.length} commit(s) to ${t.baseBranch}:`);
+        for (const commit of commits) {
+          console.log(`  ${commit.hash} ${commit.subject}`);
+        }
+
+        // Perform the merge
+        const result = await mergeTaskBranch(t.repoPath, taskId, t.baseBranch);
+
+        if (result.success) {
+          console.log(`\nMerged to ${t.baseBranch} successfully.`);
+          if (options.delete) {
+            await deleteTask(taskId);
+            console.log(`Task ${taskId} deleted.`);
+          } else {
+            console.log(`Delete the task with: cm task delete ${taskId}`);
+          }
+        } else if (result.conflicted) {
+          console.log(`\n${result.error}`);
+          console.log(`To resolve manually:`);
+          console.log(`  cd ${t.repoPath}`);
+          console.log(`  git checkout ${t.baseBranch}`);
+          console.log(`  git merge cm-task/${taskId}`);
+          console.log(`  # resolve conflicts`);
+          console.log(`  git commit`);
+        } else {
+          console.log(`\nMerge failed: ${result.error}`);
+        }
       } catch (error) {
         handleError(error);
       }

@@ -6,13 +6,15 @@ import { homedir } from "os";
 import { join, dirname } from "path";
 import { mkdir, rm } from "fs/promises";
 import { CLI_NAME } from "../constants";
-import { TaskNotFoundError, InvalidTaskStateError } from "../errors";
+import { TaskNotFoundError, InvalidTaskStateError, InvalidBranchError } from "../errors";
 import { generateTaskId } from "./id-generator";
 import {
   createWorktree,
   removeWorktree,
   findGitRoot,
   getWorktreePath,
+  getCurrentBranch,
+  branchExists,
 } from "./worktree";
 import type {
   Task,
@@ -193,12 +195,24 @@ export async function createTask(
   // Get repo path
   const actualRepoPath = repoPath || (await findGitRoot(process.cwd()));
 
+  // Determine base branch
+  let baseBranch: string;
+  if (options.baseBranch) {
+    // Validate that the specified branch exists
+    if (!(await branchExists(actualRepoPath, options.baseBranch))) {
+      throw new InvalidBranchError(options.baseBranch);
+    }
+    baseBranch = options.baseBranch;
+  } else {
+    baseBranch = await getCurrentBranch(actualRepoPath);
+  }
+
   // Generate unique ID
   const existingIds = await getExistingTaskIds();
   const taskId = generateTaskId(existingIds);
 
-  // Create worktree
-  const worktreePath = await createWorktree(actualRepoPath, taskId);
+  // Create worktree with base branch
+  const worktreePath = await createWorktree(actualRepoPath, taskId, baseBranch);
 
   // Initialize step executions
   const steps: StepExecution[] = workflow.steps.map((step) => ({
@@ -217,6 +231,7 @@ export async function createTask(
     status: "pending",
     worktreePath,
     repoPath: actualRepoPath,
+    baseBranch,
     currentStep: 0,
     steps,
     createdAt: new Date().toISOString(),

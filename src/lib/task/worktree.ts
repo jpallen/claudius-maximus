@@ -226,3 +226,185 @@ export async function listWorktrees(
 
   return worktrees;
 }
+
+/**
+ * Check if a branch exists
+ */
+export async function branchExists(
+  repoPath: string,
+  branchName: string
+): Promise<boolean> {
+  const proc = Bun.spawn(
+    ["git", "rev-parse", "--verify", "--quiet", branchName],
+    {
+      cwd: repoPath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+
+  const exitCode = await proc.exited;
+  return exitCode === 0;
+}
+
+/** Commit info for merge summary */
+export interface CommitInfo {
+  hash: string;
+  subject: string;
+}
+
+/**
+ * Check if task branch has commits ahead of base branch
+ */
+export async function hasCommitsToMerge(
+  repoPath: string,
+  taskId: string,
+  baseBranch: string
+): Promise<boolean> {
+  const taskBranch = `cm-task/${taskId}`;
+
+  const proc = Bun.spawn(
+    ["git", "rev-list", "--count", `${baseBranch}..${taskBranch}`],
+    {
+      cwd: repoPath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+
+  const stdout = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+
+  if (exitCode !== 0) {
+    return false;
+  }
+
+  const count = parseInt(stdout.trim(), 10);
+  return count > 0;
+}
+
+/**
+ * Get list of commits to merge from task branch to base branch
+ */
+export async function getTaskCommitSummary(
+  repoPath: string,
+  taskId: string,
+  baseBranch: string
+): Promise<CommitInfo[]> {
+  const taskBranch = `cm-task/${taskId}`;
+
+  const proc = Bun.spawn(
+    ["git", "log", "--oneline", `${baseBranch}..${taskBranch}`],
+    {
+      cwd: repoPath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+
+  const stdout = await new Response(proc.stdout).text();
+  const exitCode = await proc.exited;
+
+  if (exitCode !== 0) {
+    return [];
+  }
+
+  const commits: CommitInfo[] = [];
+  for (const line of stdout.trim().split("\n")) {
+    if (line) {
+      const spaceIndex = line.indexOf(" ");
+      if (spaceIndex > 0) {
+        commits.push({
+          hash: line.slice(0, spaceIndex),
+          subject: line.slice(spaceIndex + 1),
+        });
+      }
+    }
+  }
+
+  return commits;
+}
+
+/** Result of a merge operation */
+export interface MergeResult {
+  success: boolean;
+  conflicted: boolean;
+  error?: string;
+}
+
+/**
+ * Merge task branch into base branch
+ */
+export async function mergeTaskBranch(
+  repoPath: string,
+  taskId: string,
+  baseBranch: string
+): Promise<MergeResult> {
+  const taskBranch = `cm-task/${taskId}`;
+
+  // First, checkout the base branch
+  const checkoutProc = Bun.spawn(["git", "checkout", baseBranch], {
+    cwd: repoPath,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const checkoutStderr = await new Response(checkoutProc.stderr).text();
+  const checkoutExit = await checkoutProc.exited;
+
+  if (checkoutExit !== 0) {
+    return {
+      success: false,
+      conflicted: false,
+      error: `Failed to checkout ${baseBranch}: ${checkoutStderr.trim()}`,
+    };
+  }
+
+  // Perform the merge
+  const mergeProc = Bun.spawn(
+    ["git", "merge", taskBranch, "--no-edit"],
+    {
+      cwd: repoPath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+
+  const mergeStdout = await new Response(mergeProc.stdout).text();
+  const mergeStderr = await new Response(mergeProc.stderr).text();
+  const mergeExit = await mergeProc.exited;
+
+  if (mergeExit !== 0) {
+    // Check if it's a conflict
+    const isConflict =
+      mergeStdout.includes("CONFLICT") ||
+      mergeStderr.includes("CONFLICT") ||
+      mergeStdout.includes("Automatic merge failed");
+
+    if (isConflict) {
+      // Abort the merge
+      await Bun.spawn(["git", "merge", "--abort"], {
+        cwd: repoPath,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+
+      return {
+        success: false,
+        conflicted: true,
+        error: "Merge conflicts detected. Please resolve manually.",
+      };
+    }
+
+    return {
+      success: false,
+      conflicted: false,
+      error: mergeStderr.trim() || mergeStdout.trim(),
+    };
+  }
+
+  return {
+    success: true,
+    conflicted: false,
+  };
+}

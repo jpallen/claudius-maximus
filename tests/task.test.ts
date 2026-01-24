@@ -1577,3 +1577,217 @@ exit 0
     expect(await attempt1File.exists()).toBe(true);
   });
 });
+
+describe("branch management", () => {
+  let ctx: TestContext;
+  let testRepoDir: string;
+  let mockDir: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    testRepoDir = await createTestRepo();
+    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-"));
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+    await rm(testRepoDir, { recursive: true, force: true });
+    await rm(mockDir, { recursive: true, force: true });
+  });
+
+  describe("--branch option", () => {
+    it("creates task from specified branch", async () => {
+      // Create a new branch
+      await Bun.spawn(["git", "checkout", "-b", "feature-branch"], {
+        cwd: testRepoDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+
+      // Make a commit on the feature branch
+      await Bun.write(join(testRepoDir, "feature.txt"), "feature content");
+      await Bun.spawn(["git", "add", "feature.txt"], {
+        cwd: testRepoDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+      await Bun.spawn(["git", "commit", "-m", "Add feature"], {
+        cwd: testRepoDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+
+      // Go back to main/master
+      await Bun.spawn(["git", "checkout", "-"], {
+        cwd: testRepoDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+
+      // Create task from feature-branch
+      const result = await runCli(ctx, testRepoDir, [
+        "task", "create", "Test from branch", "--branch", "feature-branch", "--no-start"
+      ]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Task created:");
+      expect(result.stdout).toContain("Base branch: feature-branch");
+    });
+
+    it("fails with invalid branch name", async () => {
+      const result = await runCli(ctx, testRepoDir, [
+        "task", "create", "Test task", "--branch", "nonexistent-branch", "--no-start"
+      ]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Branch \"nonexistent-branch\" does not exist");
+    });
+
+    it("uses current branch when --branch not specified", async () => {
+      const result = await runCli(ctx, testRepoDir, [
+        "task", "create", "Test task", "--no-start"
+      ]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Base branch:");
+      // Should contain either main or master
+      expect(
+        result.stdout.includes("Base branch: main") ||
+        result.stdout.includes("Base branch: master")
+      ).toBe(true);
+    });
+
+    it("shows base branch in task status", async () => {
+      const createResult = await runCli(ctx, testRepoDir, [
+        "task", "create", "Test task", "--no-start"
+      ]);
+
+      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const taskId = match![1];
+
+      const statusResult = await runCli(ctx, testRepoDir, ["task", "status", taskId]);
+
+      expect(statusResult.exitCode).toBe(0);
+      expect(statusResult.stdout).toContain("Base branch:");
+    });
+  });
+
+  describe("task merge", () => {
+    it("fails on non-completed task", async () => {
+      const createResult = await runCli(ctx, testRepoDir, [
+        "task", "create", "Test task", "--no-start"
+      ]);
+
+      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const taskId = match![1];
+
+      const mergeResult = await runCli(ctx, testRepoDir, ["task", "merge", taskId]);
+
+      expect(mergeResult.exitCode).toBe(0);
+      expect(mergeResult.stdout).toContain("not completed");
+      expect(mergeResult.stdout).toContain("pending");
+    });
+
+    it("handles no commits to merge", async () => {
+      const { scriptPath } = await createMockClaude(mockDir);
+
+      // Create and complete a task (quick workflow - single step)
+      const createResult = await runCli(
+        ctx,
+        testRepoDir,
+        ["task", "create", "Test merge", "--workflow", "quick"],
+        { CM_CLAUDE_COMMAND: scriptPath }
+      );
+
+      expect(createResult.exitCode).toBe(0);
+
+      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const taskId = match![1];
+
+      // Task is completed but has no commits (mock Claude doesn't make any)
+      const mergeResult = await runCli(ctx, testRepoDir, ["task", "merge", taskId]);
+
+      expect(mergeResult.exitCode).toBe(0);
+      expect(mergeResult.stdout).toContain("No commits to merge");
+    });
+
+    it("merges commits successfully", async () => {
+      const { scriptPath } = await createMockClaude(mockDir);
+
+      // Create and complete a task
+      const createResult = await runCli(
+        ctx,
+        testRepoDir,
+        ["task", "create", "Test merge with commits", "--workflow", "quick"],
+        { CM_CLAUDE_COMMAND: scriptPath }
+      );
+
+      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const taskId = match![1];
+
+      // Make a commit in the task worktree
+      const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+      await Bun.write(join(worktreePath, "new-file.txt"), "new content");
+      await Bun.spawn(["git", "add", "new-file.txt"], {
+        cwd: worktreePath,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+      await Bun.spawn(["git", "commit", "-m", "Add new file from task"], {
+        cwd: worktreePath,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+
+      // Merge the task
+      const mergeResult = await runCli(ctx, testRepoDir, ["task", "merge", taskId]);
+
+      expect(mergeResult.exitCode).toBe(0);
+      expect(mergeResult.stdout).toContain("1 commit(s)");
+      expect(mergeResult.stdout).toContain("Add new file from task");
+      expect(mergeResult.stdout).toContain("Merged to");
+      expect(mergeResult.stdout).toContain("successfully");
+    });
+
+    it("deletes task with --delete option", async () => {
+      const { scriptPath } = await createMockClaude(mockDir);
+
+      // Create and complete a task
+      const createResult = await runCli(
+        ctx,
+        testRepoDir,
+        ["task", "create", "Test merge delete", "--workflow", "quick"],
+        { CM_CLAUDE_COMMAND: scriptPath }
+      );
+
+      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const taskId = match![1];
+
+      // Make a commit in the task worktree
+      const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+      await Bun.write(join(worktreePath, "another-file.txt"), "content");
+      await Bun.spawn(["git", "add", "another-file.txt"], {
+        cwd: worktreePath,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+      await Bun.spawn(["git", "commit", "-m", "Add another file"], {
+        cwd: worktreePath,
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited;
+
+      // Merge with --delete
+      const mergeResult = await runCli(ctx, testRepoDir, ["task", "merge", taskId, "--delete"]);
+
+      expect(mergeResult.exitCode).toBe(0);
+      expect(mergeResult.stdout).toContain("Merged to");
+      expect(mergeResult.stdout).toContain("deleted");
+
+      // Verify task is gone
+      const statusResult = await runCli(ctx, testRepoDir, ["task", "status", taskId]);
+      expect(statusResult.exitCode).toBe(1);
+      expect(statusResult.stderr).toContain("not found");
+    });
+  });
+});

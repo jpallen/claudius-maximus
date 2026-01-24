@@ -93,3 +93,14 @@ export class NotInGitRepoError extends CmError {
     this.name = "NotInGitRepoError";
   }
 }
+
+/** Error when a branch does not exist */
+export class InvalidBranchError extends CmError {
+  branchName: string;
+
+  constructor(branchName: string) {
+    super(`Branch "${branchName}" does not exist`);
+    this.name = "InvalidBranchError";
+    this.branchName = branchName;
+  }
+}

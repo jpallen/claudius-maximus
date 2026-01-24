@@ -81,6 +81,8 @@ export interface Task {
   worktreePath: string;
   /** Path to the original repository */
   repoPath: string;
+  /** Base branch this task was created from (for merge-back) */
+  baseBranch: string;
   /** Index of the current step (0-based) */
   currentStep: number;
   /** Record of all step executions */
@@ -121,4 +123,6 @@ export interface CreateTaskOptions {
   workflow?: string;
   /** Whether to start execution immediately (default: true) */
   start?: boolean;
+  /** Base branch to create task from (default: current branch) */
+  baseBranch?: string;
 }
