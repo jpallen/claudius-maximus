@@ -454,8 +454,9 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Workflow completed");
-    expect(result.stdout).toContain("Steps completed: 2");
+    expect(result.stdout).toContain("Workflow completed successfully");
+    expect(result.stdout).toContain("Step 1/2: plan");
+    expect(result.stdout).toContain("Step 2/2: implement");
 
     // Verify Claude was called for each step
     const log = await readMockLog(logPath);
@@ -475,8 +476,8 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Workflow completed");
-    expect(result.stdout).toContain("Steps completed: 1");
+    expect(result.stdout).toContain("Workflow completed successfully");
+    expect(result.stdout).toContain("Step 1/1: execute");
 
     const log = await readMockLog(logPath);
     expect(log).toContain("PROMPT: Execute the task quickly");
@@ -506,7 +507,7 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(step1Result.exitCode).toBe(0);
-    expect(step1Result.stdout).toContain("Step completed successfully");
+    expect(step1Result.stdout).toContain("Step completed");
     expect(step1Result.stdout).toContain("Next step: implement");
 
     // Check log has first step
@@ -552,8 +553,7 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(runResult.exitCode).toBe(0);
-    expect(runResult.stdout).toContain("Workflow completed");
-    expect(runResult.stdout).toContain("Steps completed: 2");
+    expect(runResult.stdout).toContain("Workflow completed successfully");
 
     // Check both steps were executed
     const log = await readMockLog(logPath);
@@ -575,7 +575,7 @@ describe("workflow execution with mock Claude", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Workflow failed");
-    expect(result.stdout).toContain("Steps completed: 1");
+    expect(result.stdout).toContain("Step failed");
 
     // Check task status shows failure
     const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
@@ -596,7 +596,7 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Workflow paused");
+    expect(result.stdout).toContain("Task is paused");
     expect(result.stdout).toContain("cm task resume");
 
     // Check status shows paused

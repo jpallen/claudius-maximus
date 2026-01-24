@@ -30,6 +30,8 @@ export interface StepResult {
   output?: string;
   /** Error message if failed */
   error?: string;
+  /** Duration in milliseconds */
+  durationMs?: number;
 }
 
 /** Result of executing a workflow */
@@ -40,6 +42,39 @@ export interface WorkflowResult {
   error?: string;
   /** Number of steps completed */
   stepsCompleted: number;
+  /** Total duration in milliseconds */
+  durationMs?: number;
+}
+
+/** Options for controlling execution output */
+export interface ExecutionOptions {
+  /** Enable streaming output from Claude */
+  stream?: boolean;
+  /** Show verbose progress information */
+  verbose?: boolean;
+  /** Custom output function (defaults to console.log) */
+  log?: (message: string) => void;
+  /** Custom stream output function (defaults to process.stdout.write) */
+  streamOutput?: (chunk: string) => void;
+}
+
+/** Default execution options (exported for use in commands) */
+export const defaultExecutionOptions: ExecutionOptions = {
+  stream: true,
+  verbose: true,
+  log: console.log,
+  streamOutput: (chunk: string) => process.stdout.write(chunk),
+};
+
+/**
+ * Format duration in human-readable format
+ */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60000);
+  const secs = Math.floor((ms % 60000) / 1000);
+  return `${mins}m ${secs}s`;
 }
 
 /**
@@ -93,9 +128,14 @@ async function executeStep(
   task: Task,
   step: WorkflowStep,
   stepIndex: number,
+  totalSteps: number,
   config: CmConfig,
+  options: ExecutionOptions,
   isResuming: boolean = false
 ): Promise<StepResult> {
+  const { stream, verbose, log, streamOutput } = options;
+  const startTime = Date.now();
+
   // Build the prompt
   const prompt = buildStepPrompt(step, task, isResuming);
 
@@ -110,6 +150,15 @@ async function executeStep(
   // Determine attempt number
   const currentStep = task.steps[stepIndex];
   const attempt = (currentStep.currentAttempt || 0) + 1;
+
+  // Log step start
+  if (verbose && log) {
+    const agentInfo = step.agent ? ` [${step.agent}]` : "";
+    const attemptInfo = attempt > 1 ? ` (attempt ${attempt})` : "";
+    log(`\n${"─".repeat(60)}`);
+    log(`Step ${stepIndex + 1}/${totalSteps}: ${step.name}${agentInfo}${attemptInfo}`);
+    log(`${"─".repeat(60)}\n`);
+  }
 
   // Update task with new attempt number
   await updateStepStatus(task.id, stepIndex, {
@@ -146,7 +195,11 @@ async function executeStep(
       taskId: task.id,
       taskStepName: step.name,
       taskStepAttempt: attempt,
+      stream: stream,
+      onStream: streamOutput,
     });
+
+    const durationMs = Date.now() - startTime;
 
     // Parse output
     const parsed = parseClaudeOutput(result.stdout);
@@ -157,6 +210,7 @@ async function executeStep(
       agent: step.agent,
       result,
       parsed,
+      durationMs,
       timestamp: new Date().toISOString(),
     });
 
@@ -169,6 +223,11 @@ async function executeStep(
       updatedAttempt = attemptData;
     }
 
+    // Log step completion
+    if (verbose && log) {
+      log(`\n${"─".repeat(60)}`);
+    }
+
     // Check if step was explicitly marked
     if (updatedAttempt.explicitlyFailed) {
       await updateStepStatus(task.id, stepIndex, {
@@ -177,10 +236,15 @@ async function executeStep(
         error: updatedAttempt.error,
       });
 
+      if (verbose && log) {
+        log(`Step failed: ${updatedAttempt.error} (${formatDuration(durationMs)})`);
+      }
+
       return {
         success: false,
         shouldPause: false,
         error: updatedAttempt.error,
+        durationMs,
       };
     }
 
@@ -191,10 +255,15 @@ async function executeStep(
         output: updatedAttempt.completionMessage || parsed.result,
       });
 
+      if (verbose && log) {
+        log(`Step completed (${formatDuration(durationMs)})`);
+      }
+
       return {
         success: true,
         shouldPause: false,
         output: updatedAttempt.completionMessage || parsed.result,
+        durationMs,
       };
     }
 
@@ -207,10 +276,15 @@ async function executeStep(
         output: parsed.result,
       });
 
+      if (verbose && log) {
+        log(`Step completed (${formatDuration(durationMs)})`);
+      }
+
       return {
         success: true,
         shouldPause: false,
         output: parsed.result,
+        durationMs,
       };
     } else {
       // Mark step as failed
@@ -221,13 +295,19 @@ async function executeStep(
         error: errorMsg,
       });
 
+      if (verbose && log) {
+        log(`Step failed: ${errorMsg} (${formatDuration(durationMs)})`);
+      }
+
       return {
         success: false,
         shouldPause: false,
         error: errorMsg,
+        durationMs,
       };
     }
   } catch (error) {
+    const durationMs = Date.now() - startTime;
     const errorMsg =
       error instanceof StepTimeoutError
         ? `Timeout after ${error.timeoutMs}ms`
@@ -247,13 +327,20 @@ async function executeStep(
       prompt,
       agent: step.agent,
       error: errorMsg,
+      durationMs,
       timestamp: new Date().toISOString(),
     });
+
+    if (verbose && log) {
+      log(`\n${"─".repeat(60)}`);
+      log(`Step failed: ${errorMsg} (${formatDuration(durationMs)})`);
+    }
 
     return {
       success: false,
       shouldPause: false,
       error: errorMsg,
+      durationMs,
     };
   }
 }
@@ -264,8 +351,10 @@ async function executeStep(
 export async function executeNextStep(
   task: Task,
   workflow: Workflow,
-  config: CmConfig
+  config: CmConfig,
+  options: ExecutionOptions = {}
 ): Promise<StepResult> {
+  const opts = { ...defaultExecutionOptions, ...options };
   const stepIndex = task.currentStep;
 
   if (stepIndex >= workflow.steps.length) {
@@ -281,7 +370,15 @@ export async function executeNextStep(
   const isResuming = !!task.resumePrompt;
 
   // Execute the step (will use resumePrompt if available)
-  const result = await executeStep(task, step, stepIndex, config, isResuming);
+  const result = await executeStep(
+    task,
+    step,
+    stepIndex,
+    workflow.steps.length,
+    config,
+    opts,
+    isResuming
+  );
 
   // Clear resume prompt after using it
   if (task.resumePrompt) {
@@ -303,12 +400,27 @@ export async function executeNextStep(
 export async function executeWorkflow(
   task: Task,
   workflow: Workflow,
-  config: CmConfig
+  config: CmConfig,
+  options: ExecutionOptions = {}
 ): Promise<WorkflowResult> {
+  const opts = { ...defaultExecutionOptions, ...options };
+  const startTime = Date.now();
   let stepsCompleted = 0;
+  let totalDuration = 0;
+
+  if (opts.verbose && opts.log) {
+    opts.log(`\nExecuting workflow: ${task.workflow}`);
+    opts.log(`Task: ${task.id}`);
+    opts.log(`Description: ${task.description}`);
+    opts.log(`Steps: ${workflow.steps.length}`);
+  }
 
   while (task.currentStep < workflow.steps.length) {
-    const result = await executeNextStep(task, workflow, config);
+    const result = await executeNextStep(task, workflow, config, opts);
+
+    if (result.durationMs) {
+      totalDuration += result.durationMs;
+    }
 
     if (result.shouldPause) {
       // Pause the task
@@ -316,6 +428,7 @@ export async function executeWorkflow(
       return {
         status: "paused",
         stepsCompleted,
+        durationMs: Date.now() - startTime,
       };
     }
 
@@ -326,6 +439,7 @@ export async function executeWorkflow(
         status: "failed",
         error: result.error,
         stepsCompleted,
+        durationMs: Date.now() - startTime,
       };
     }
 
@@ -335,10 +449,21 @@ export async function executeWorkflow(
     task = await loadTask(task.id);
   }
 
+  const durationMs = Date.now() - startTime;
+
   // All steps completed
   await completeTask(task.id);
+
+  if (opts.verbose && opts.log) {
+    opts.log(`\n${"═".repeat(60)}`);
+    opts.log(`Workflow completed successfully`);
+    opts.log(`Total time: ${formatDuration(durationMs)}`);
+    opts.log(`${"═".repeat(60)}`);
+  }
+
   return {
     status: "completed",
     stepsCompleted,
+    durationMs,
   };
 }

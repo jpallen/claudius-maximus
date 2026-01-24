@@ -30,6 +30,9 @@ export interface ClaudeResult {
   success: boolean;
 }
 
+/** Callback for streaming output */
+export type StreamCallback = (chunk: string) => void;
+
 /** Options for running Claude CLI */
 export interface ClaudeRunOptions {
   /** The prompt to send */
@@ -52,6 +55,10 @@ export interface ClaudeRunOptions {
   taskStepName?: string;
   /** Attempt number for completion tracking */
   taskStepAttempt?: number;
+  /** Enable streaming output */
+  stream?: boolean;
+  /** Callback for streaming output (called with each text chunk) */
+  onStream?: StreamCallback;
 }
 
 /**
@@ -71,6 +78,79 @@ function mapAgentToModel(agent: AgentModel): string {
 }
 
 /**
+ * Process streaming JSON output from Claude CLI
+ * Extracts text content from assistant messages and calls the callback
+ */
+async function processStreamingOutput(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  onStream?: StreamCallback
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let fullOutput = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // Process complete lines
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const event = JSON.parse(line);
+
+        // Handle different event types
+        if (event.type === "assistant" && event.message?.content) {
+          // Assistant message with content blocks
+          for (const block of event.message.content) {
+            if (block.type === "text" && block.text) {
+              fullOutput += block.text;
+              onStream?.(block.text);
+            }
+          }
+        } else if (event.type === "content_block_delta") {
+          // Streaming delta
+          if (event.delta?.type === "text_delta" && event.delta?.text) {
+            fullOutput += event.delta.text;
+            onStream?.(event.delta.text);
+          }
+        } else if (event.type === "result") {
+          // Final result
+          if (event.result) {
+            fullOutput = event.result;
+          }
+        }
+      } catch {
+        // Not JSON, might be raw output
+        fullOutput += line + "\n";
+        onStream?.(line + "\n");
+      }
+    }
+  }
+
+  // Process any remaining buffer
+  if (buffer.trim()) {
+    try {
+      const event = JSON.parse(buffer);
+      if (event.type === "result" && event.result) {
+        fullOutput = event.result;
+      }
+    } catch {
+      fullOutput += buffer;
+      onStream?.(buffer);
+    }
+  }
+
+  return fullOutput;
+}
+
+/**
  * Run Claude CLI with the given options
  */
 export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult> {
@@ -85,11 +165,14 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     taskId,
     taskStepName,
     taskStepAttempt,
+    stream = false,
+    onStream,
   } = options;
 
   // Build command arguments
   const claudeCmd = getClaudeCommand();
-  const args: string[] = [claudeCmd, "-p", prompt, "--output-format", "json"];
+  const outputFormat = stream ? "stream-json" : "json";
+  const args: string[] = [claudeCmd, "-p", prompt, "--output-format", outputFormat];
 
   if (agent) {
     args.push("--model", mapAgentToModel(agent));
@@ -139,14 +222,33 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
   });
 
   try {
-    // Wait for process to complete or timeout
-    const [stdout, stderr] = await Promise.race([
-      Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]),
-      timeoutPromise,
-    ]);
+    let stdout: string;
+    let stderr: string;
+
+    if (stream && onStream) {
+      // Stream stdout while capturing stderr
+      const reader = proc.stdout.getReader();
+      const [streamedOutput, stderrOutput] = await Promise.race([
+        Promise.all([
+          processStreamingOutput(reader, onStream),
+          new Response(proc.stderr).text(),
+        ]),
+        timeoutPromise,
+      ]);
+      stdout = streamedOutput;
+      stderr = stderrOutput;
+    } else {
+      // Buffer all output
+      const [stdoutOutput, stderrOutput] = await Promise.race([
+        Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]),
+        timeoutPromise,
+      ]);
+      stdout = stdoutOutput;
+      stderr = stderrOutput;
+    }
 
     const exitCode = await proc.exited;
 

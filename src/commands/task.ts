@@ -15,7 +15,11 @@ import {
   markStepFailed,
 } from "../lib/task/manager";
 import { findAndLoadConfig, getWorkflow } from "../lib/workflow/loader";
-import { executeWorkflow, executeNextStep } from "../lib/workflow/executor";
+import {
+  executeWorkflow,
+  executeNextStep,
+  type ExecutionOptions,
+} from "../lib/workflow/executor";
 import { findGitRoot } from "../lib/task/worktree";
 import {
   CmError,
@@ -66,12 +70,13 @@ export function createTaskCommand(): Command {
     "Manage workflow tasks with git worktrees"
   );
 
-  // cm task create "description" [--workflow <name>] [--no-start]
+  // cm task create "description" [--workflow <name>] [--no-start] [--quiet]
   task
     .command("create <description>")
     .description("Create a new task and optionally run it")
     .option("-w, --workflow <name>", "Workflow to use", "default")
     .option("--no-start", "Create task without starting execution")
+    .option("-q, --quiet", "Suppress streaming output")
     .action(async (description: string, options) => {
       try {
         // Find git root
@@ -100,23 +105,27 @@ export function createTaskCommand(): Command {
 
         // Start execution if requested
         if (options.start !== false) {
-          console.log("\nStarting workflow execution...\n");
-
           await startTask(newTask.id);
           const updatedTask = await getTask(newTask.id);
-          const result = await executeWorkflow(updatedTask, workflow, config);
 
-          console.log(`\nWorkflow ${result.status}`);
-          if (result.stepsCompleted > 0) {
-            console.log(`Steps completed: ${result.stepsCompleted}`);
-          }
+          const execOptions: ExecutionOptions = {
+            stream: !options.quiet,
+            verbose: true,
+          };
+
+          const result = await executeWorkflow(
+            updatedTask,
+            workflow,
+            config,
+            execOptions
+          );
 
           if (result.status === "paused") {
             console.log(
               `\nTask is paused. Resume with: cm task resume ${newTask.id} --prompt "..."`
             );
           } else if (result.status === "failed") {
-            console.log(`Error: ${result.error}`);
+            console.log(`\nWorkflow failed: ${result.error}`);
           }
         } else {
           console.log(`\nTask created but not started.`);
@@ -241,7 +250,8 @@ export function createTaskCommand(): Command {
   task
     .command("run <id>")
     .description("Run all remaining steps of a task")
-    .action(async (taskId: string) => {
+    .option("-q, --quiet", "Suppress streaming output")
+    .action(async (taskId: string, options) => {
       try {
         // Load task
         let t = await getTask(taskId);
@@ -270,22 +280,19 @@ export function createTaskCommand(): Command {
           t = await startTask(taskId);
         }
 
-        console.log(`Running task: ${taskId}`);
-        console.log(`Starting from step ${t.currentStep + 1}/${workflow.steps.length}\n`);
+        const execOptions: ExecutionOptions = {
+          stream: !options.quiet,
+          verbose: true,
+        };
 
-        const result = await executeWorkflow(t, workflow, config);
-
-        console.log(`\nWorkflow ${result.status}`);
-        if (result.stepsCompleted > 0) {
-          console.log(`Steps completed: ${result.stepsCompleted}`);
-        }
+        const result = await executeWorkflow(t, workflow, config, execOptions);
 
         if (result.status === "paused") {
           console.log(
             `\nTask is paused. Resume with: cm task resume ${taskId} --prompt "..."`
           );
         } else if (result.status === "failed") {
-          console.log(`Error: ${result.error}`);
+          console.log(`\nWorkflow failed: ${result.error}`);
         }
       } catch (error) {
         handleError(error);
@@ -296,7 +303,8 @@ export function createTaskCommand(): Command {
   task
     .command("step <id>")
     .description("Run just the next step of a task")
-    .action(async (taskId: string) => {
+    .option("-q, --quiet", "Suppress streaming output")
+    .action(async (taskId: string, options) => {
       try {
         // Load task
         let t = await getTask(taskId);
@@ -330,12 +338,12 @@ export function createTaskCommand(): Command {
           t = await startTask(taskId);
         }
 
-        const currentStep = workflow.steps[t.currentStep];
-        console.log(
-          `Running step ${t.currentStep + 1}/${workflow.steps.length}: ${currentStep.name}`
-        );
+        const execOptions: ExecutionOptions = {
+          stream: !options.quiet,
+          verbose: true,
+        };
 
-        const result = await executeNextStep(t, workflow, config);
+        const result = await executeNextStep(t, workflow, config, execOptions);
 
         if (result.shouldPause) {
           console.log(`\nStep requires user input.`);
@@ -343,19 +351,15 @@ export function createTaskCommand(): Command {
             `Resume with: cm task resume ${taskId} --prompt "..."`
           );
         } else if (result.success) {
-          console.log(`\nStep completed successfully.`);
-
           // Check if there are more steps
           const updatedTask = await getTask(taskId);
           if (updatedTask.currentStep >= workflow.steps.length) {
-            console.log(`Task completed!`);
+            console.log(`\nTask completed!`);
           } else {
             console.log(
-              `Next step: ${workflow.steps[updatedTask.currentStep].name}`
+              `\nNext step: ${workflow.steps[updatedTask.currentStep].name}`
             );
           }
-        } else {
-          console.log(`\nStep failed: ${result.error}`);
         }
       } catch (error) {
         handleError(error);
@@ -367,6 +371,7 @@ export function createTaskCommand(): Command {
     .command("resume <id>")
     .description("Resume a paused task with user input")
     .option("-p, --prompt <prompt>", "Prompt to provide for the paused step")
+    .option("-q, --quiet", "Suppress streaming output")
     .action(async (taskId: string, options) => {
       try {
         let t = await getTask(taskId);
@@ -391,23 +396,20 @@ export function createTaskCommand(): Command {
         const workflow = getWorkflow(config, t.workflow);
 
         console.log(`Resuming task: ${taskId}`);
-        console.log(
-          `Current step: ${t.currentStep + 1}/${workflow.steps.length}\n`
-        );
 
-        const result = await executeWorkflow(t, workflow, config);
+        const execOptions: ExecutionOptions = {
+          stream: !options.quiet,
+          verbose: true,
+        };
 
-        console.log(`\nWorkflow ${result.status}`);
-        if (result.stepsCompleted > 0) {
-          console.log(`Steps completed: ${result.stepsCompleted}`);
-        }
+        const result = await executeWorkflow(t, workflow, config, execOptions);
 
         if (result.status === "paused") {
           console.log(
             `\nTask is paused again. Resume with: cm task resume ${taskId} --prompt "..."`
           );
         } else if (result.status === "failed") {
-          console.log(`Error: ${result.error}`);
+          console.log(`\nWorkflow failed: ${result.error}`);
         }
       } catch (error) {
         handleError(error);
