@@ -1,5 +1,6 @@
 import { Command } from "commander";
-import { resolve } from "path";
+import { resolve, join } from "path";
+import { stat } from "fs/promises";
 import {
   getDevVersionPath,
   setDevVersionPath,
@@ -7,6 +8,60 @@ import {
   getConfigPath,
 } from "../lib/config";
 import { CLI_NAME } from "../lib/constants";
+
+/** Environment variable set when running as a proxied dev version */
+const DEV_PROXY_ENV = "CM_DEV_PROXY";
+
+/**
+ * Determines how to run the dev version based on the path type:
+ * - Directory: run `bun run <dir>/src/index.ts`
+ * - .ts file: run `bun run <file>`
+ * - Binary: run directly
+ */
+async function resolveDevTarget(devPath: string): Promise<{
+  exists: boolean;
+  type: "directory" | "typescript" | "binary";
+  entrypoint: string;
+  runArgs: string[];
+} | null> {
+  try {
+    const stats = await stat(devPath);
+
+    if (stats.isDirectory()) {
+      // Look for src/index.ts in the directory
+      const entrypoint = join(devPath, "src", "index.ts");
+      const entryFile = Bun.file(entrypoint);
+      if (await entryFile.exists()) {
+        return {
+          exists: true,
+          type: "directory",
+          entrypoint,
+          runArgs: ["bun", "run", entrypoint],
+        };
+      }
+      return null;
+    }
+
+    if (devPath.endsWith(".ts")) {
+      return {
+        exists: true,
+        type: "typescript",
+        entrypoint: devPath,
+        runArgs: ["bun", "run", devPath],
+      };
+    }
+
+    // Assume binary
+    return {
+      exists: true,
+      type: "binary",
+      entrypoint: devPath,
+      runArgs: [devPath],
+    };
+  } catch {
+    return null;
+  }
+}
 
 export function createDevCommand(): Command {
   const dev = new Command("dev")
@@ -21,12 +76,14 @@ export function createDevCommand(): Command {
       if (devPath) {
         console.log(`Dev version path: ${devPath}`);
 
-        // Check if the file exists
-        const file = Bun.file(devPath);
-        if (await file.exists()) {
-          console.log("Status: File exists");
+        const target = await resolveDevTarget(devPath);
+        if (target) {
+          console.log(`Type: ${target.type}`);
+          if (target.type === "directory") {
+            console.log(`Entry point: ${target.entrypoint}`);
+          }
         } else {
-          console.log("Status: File NOT FOUND (will use self)");
+          console.log("Status: NOT FOUND (will use self)");
         }
       } else {
         console.log("No dev version configured (using self)");
@@ -36,20 +93,25 @@ export function createDevCommand(): Command {
 
   dev
     .command("set <path>")
-    .description("Set the path to a dev version binary")
+    .description("Set the path to a dev version (directory, .ts file, or binary)")
     .action(async (path: string) => {
       const resolvedPath = resolve(path);
+      const target = await resolveDevTarget(resolvedPath);
 
-      // Check if file exists
-      const file = Bun.file(resolvedPath);
-      if (!(await file.exists())) {
-        console.warn(`Warning: File does not exist at ${resolvedPath}`);
+      if (!target) {
+        console.warn(`Warning: Could not resolve dev target at ${resolvedPath}`);
+        console.warn("For directories, ensure src/index.ts exists.");
         console.warn("Setting anyway - make sure the path is correct.");
+      } else {
+        console.log(`Detected type: ${target.type}`);
+        if (target.type === "directory") {
+          console.log(`Entry point: ${target.entrypoint}`);
+        }
       }
 
       await setDevVersionPath(resolvedPath);
-      console.log(`Dev version set to: ${resolvedPath}`);
-      console.log(`\nCommands will now proxy to this binary.`);
+      console.log(`\nDev version set to: ${resolvedPath}`);
+      console.log(`Commands will now proxy to this version.`);
       console.log(`Use '${CLI_NAME} dev clear' to reset.`);
     });
 
@@ -63,7 +125,7 @@ export function createDevCommand(): Command {
 
   dev
     .command("status")
-    .description("Show dev mode status and test the configured binary")
+    .description("Show dev mode status and test the configured version")
     .action(async () => {
       const devPath = await getDevVersionPath();
 
@@ -73,30 +135,39 @@ export function createDevCommand(): Command {
       }
 
       console.log("Dev mode: ENABLED");
-      console.log(`Binary path: ${devPath}`);
+      console.log(`Path: ${devPath}`);
 
-      const file = Bun.file(devPath);
-      if (!(await file.exists())) {
-        console.log("Status: ERROR - Binary not found!");
+      const target = await resolveDevTarget(devPath);
+      if (!target) {
+        console.log("Status: ERROR - Target not found!");
         return;
       }
 
-      // Try to get version from the dev binary
+      console.log(`Type: ${target.type}`);
+      if (target.type === "directory") {
+        console.log(`Entry point: ${target.entrypoint}`);
+      }
+
+      // Try to get version from the dev version
       try {
-        const proc = Bun.spawn([devPath, "--version"], {
+        const proc = Bun.spawn([...target.runArgs, "--version"], {
           stdout: "pipe",
           stderr: "pipe",
+          env: {
+            ...process.env,
+            [DEV_PROXY_ENV]: "1",
+          },
         });
         const output = await new Response(proc.stdout).text();
         await proc.exited;
 
         if (proc.exitCode === 0) {
-          console.log(`Dev binary version: ${output.trim()}`);
+          console.log(`Dev version: ${output.trim()}`);
         } else {
-          console.log("Status: Binary exists but --version failed");
+          console.log("Status: Target exists but --version failed");
         }
       } catch (error) {
-        console.log("Status: Could not execute binary");
+        console.log("Status: Could not execute target");
       }
     });
 
@@ -108,6 +179,11 @@ export function createDevCommand(): Command {
  * Returns true if we proxied (and should exit), false otherwise.
  */
 export async function maybeProxyToDevVersion(args: string[]): Promise<boolean> {
+  // Don't proxy if we're already running as a proxied dev version
+  if (process.env[DEV_PROXY_ENV] === "1") {
+    return false;
+  }
+
   // Don't proxy dev commands themselves to avoid infinite loops
   if (args.length >= 1 && args[0] === "dev") {
     return false;
@@ -118,18 +194,22 @@ export async function maybeProxyToDevVersion(args: string[]): Promise<boolean> {
     return false;
   }
 
-  const file = Bun.file(devPath);
-  if (!(await file.exists())) {
-    console.error(`Warning: Dev binary not found at ${devPath}`);
+  const target = await resolveDevTarget(devPath);
+  if (!target) {
+    console.error(`Warning: Dev target not found at ${devPath}`);
     console.error("Falling back to self. Use 'cm dev clear' to reset.\n");
     return false;
   }
 
-  // Proxy to the dev version
-  const proc = Bun.spawn([devPath, ...args], {
+  // Proxy to the dev version with env var to prevent recursion
+  const proc = Bun.spawn([...target.runArgs, ...args], {
     stdout: "inherit",
     stderr: "inherit",
     stdin: "inherit",
+    env: {
+      ...process.env,
+      [DEV_PROXY_ENV]: "1",
+    },
   });
 
   const exitCode = await proc.exited;
