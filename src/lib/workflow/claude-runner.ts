@@ -6,8 +6,6 @@ import { ClaudeExecutionError, StepTimeoutError } from "../errors";
 import type { Model } from "./types";
 import type { PendingQuestion, QuestionDetail } from "../task/types";
 
-/** Default timeout: 5 minutes */
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Environment variable to override the Claude command (for testing) */
 const CLAUDE_COMMAND_ENV = "CM_CLAUDE_COMMAND";
@@ -478,7 +476,7 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     model,
     agent,
     cwd,
-    timeout = DEFAULT_TIMEOUT_MS,
+    timeout,
     stepName = "step",
     appendSystemPrompt,
     taskId,
@@ -567,14 +565,17 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     env,
   });
 
-  // Set up timeout
+  // Set up timeout (only if timeout is specified)
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      proc.kill();
-      reject(new StepTimeoutError(stepName, timeout));
-    }, timeout);
-  });
+  let timeoutPromise: Promise<never> | undefined;
+  if (timeout !== undefined) {
+    timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        proc.kill();
+        reject(new StepTimeoutError(stepName, timeout));
+      }, timeout);
+    });
+  }
 
   try {
     let stdout: string;
@@ -585,26 +586,26 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     if (stream && onStream) {
       // Stream stdout while capturing stderr
       const reader = proc.stdout.getReader();
-      const [streamResult, stderrOutput] = await Promise.race([
-        Promise.all([
-          processStreamingOutput(reader, stepName, onStream, onQuestionAnswer),
-          new Response(proc.stderr).text(),
-        ]),
-        timeoutPromise,
+      const workPromise = Promise.all([
+        processStreamingOutput(reader, stepName, onStream, onQuestionAnswer),
+        new Response(proc.stderr).text(),
       ]);
+      const [streamResult, stderrOutput] = timeoutPromise
+        ? await Promise.race([workPromise, timeoutPromise])
+        : await workPromise;
       stdout = streamResult.output;
       sessionId = streamResult.sessionId;
       pendingQuestion = streamResult.pendingQuestion;
       stderr = stderrOutput;
     } else {
       // Buffer all output
-      const [stdoutOutput, stderrOutput] = await Promise.race([
-        Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ]),
-        timeoutPromise,
+      const workPromise = Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
       ]);
+      const [stdoutOutput, stderrOutput] = timeoutPromise
+        ? await Promise.race([workPromise, timeoutPromise])
+        : await workPromise;
       stdout = stdoutOutput;
       stderr = stderrOutput;
 

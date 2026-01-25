@@ -15,7 +15,7 @@ export interface WorkflowStep {
   agent?: string;
   /** Prompt to send to Claude */
   prompt?: string;
-  /** Timeout in milliseconds (default: 5 minutes) */
+  /** Timeout in milliseconds (no timeout if not specified) */
   timeout?: number;
 }
 
