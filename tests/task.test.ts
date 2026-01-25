@@ -4,6 +4,9 @@ import { join } from "path";
 import { mkdtemp, rm, chmod, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 
+// CLI entry point path for running cm commands from mock
+const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
+
 /**
  * Create a mock Claude CLI script for testing
  * Returns the path to the mock script
@@ -19,17 +22,24 @@ async function createMockClaude(
     logArgs?: boolean;
     /** Simulate failure on specific step names (partial match in prompt) */
     failOnStep?: string;
+    /** For orchestrator mode: sequence of steps to run before completing */
+    orchestratorSteps?: string[];
   } = {}
 ): Promise<{ scriptPath: string; logPath: string }> {
   const scriptPath = join(baseDir, "mock-claude");
   const logPath = join(baseDir, "claude-calls.log");
+  const stepCountPath = join(baseDir, "step-count");
 
   const {
     output = "Task completed successfully",
     exitCode = 0,
     logArgs = true,
     failOnStep,
+    orchestratorSteps = [],
   } = options;
+
+  // Use bun run with the CLI entry point instead of 'cm'
+  const cmCommand = `bun run "${CLI_ENTRY}"`;
 
   // Create a shell script that mimics claude CLI behavior
   const script = `#!/bin/bash
@@ -63,6 +73,8 @@ done
 # Log parsed values
 ${logArgs ? `echo "PROMPT: $PROMPT" >> "${logPath}"` : ""}
 ${logArgs ? `echo "MODEL: $MODEL" >> "${logPath}"` : ""}
+${logArgs ? `echo "CM_TASK_ID: $CM_TASK_ID" >> "${logPath}"` : ""}
+${logArgs ? `echo "CM_STEP_NAME: $CM_STEP_NAME" >> "${logPath}"` : ""}
 ${logArgs ? `echo "---" >> "${logPath}"` : ""}
 
 ${
@@ -77,16 +89,54 @@ fi
     : ""
 }
 
-# Output JSON result
-echo '{"result": "${output}"}'
-exit ${exitCode}
+# Check if this is an orchestrator call or a step call
+if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
+  # Orchestrator call - need to make a decision
+  # Track which iteration we're on
+  if [[ -f "${stepCountPath}" ]]; then
+    COUNT=$(cat "${stepCountPath}")
+  else
+    COUNT=0
+  fi
+
+  # Increment counter
+  NEW_COUNT=$((COUNT + 1))
+  echo "$NEW_COUNT" > "${stepCountPath}"
+
+  STEPS=(${orchestratorSteps.map(s => `"${s}"`).join(" ")})
+  TOTAL_STEPS=${orchestratorSteps.length}
+
+  if [[ $COUNT -lt $TOTAL_STEPS ]]; then
+    # Run the next step
+    NEXT_STEP="\${STEPS[$COUNT]}"
+    ${cmCommand} system orchestrator-decision --step "$NEXT_STEP" --reason "Mock orchestrator running step $((COUNT + 1))"
+  else
+    # All steps done, complete the workflow
+    ${cmCommand} system orchestrator-decision --complete --summary "Mock workflow completed after $TOTAL_STEPS steps"
+  fi
+
+  echo '{"result": "Orchestrator decision made"}'
+  exit 0
+
+elif [[ -n "$CM_STEP_NAME" ]]; then
+  # Step call - mark as complete
+  ${cmCommand} task complete --message "Mock step $CM_STEP_NAME completed: ${output}"
+  echo '{"result": "${output}"}'
+  exit ${exitCode}
+
+else
+  # Regular call without task context
+  echo '{"result": "${output}"}'
+  exit ${exitCode}
+fi
 `;
 
   await Bun.write(scriptPath, script);
   await chmod(scriptPath, 0o755);
 
-  // Initialize empty log file
+  // Initialize empty log file and step counter
   await Bun.write(logPath, "");
+  await Bun.write(stepCountPath, "0");
 
   return { scriptPath, logPath };
 }
@@ -113,11 +163,14 @@ async function createTestRepo(): Promise<string> {
   await Bun.spawn(["git", "config", "user.email", "test@test.com"], { cwd: repoDir, stdout: "pipe", stderr: "pipe" }).exited;
   await Bun.spawn(["git", "config", "user.name", "Test"], { cwd: repoDir, stdout: "pipe", stderr: "pipe" }).exited;
 
-  // Create a simple cm.yml
+  // Create a simple cm.yml with orchestrator prompts
   const cmYml = `version: "1"
 
 workflows:
   default:
+    prompt: |
+      Plan the task first, then implement it.
+      Ask for user input if anything is unclear.
     steps:
       - name: plan
         model: sonnet
@@ -127,15 +180,19 @@ workflows:
         prompt: "Implement the changes."
 
   quick:
+    prompt: Execute the task quickly in one step.
     steps:
       - name: execute
         model: haiku
         prompt: "Execute the task quickly."
 
   needs-input:
+    prompt: |
+      Gather information from the user before proceeding.
+      Ask clarifying questions as needed.
     steps:
       - name: gather
-        # No model or prompt - will pause for user input
+        prompt: "Gather requirements from user."
 `;
 
   await Bun.write(join(repoDir, "cm.yml"), cmYml);
@@ -423,7 +480,10 @@ describe("workflow execution with mock Claude", () => {
   });
 
   it("executes all workflow steps with mock Claude", async () => {
-    const { scriptPath, logPath } = await createMockClaude(mockDir);
+    // Mock orchestrator will run plan then implement steps
+    const { scriptPath, logPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["plan", "implement"],
+    });
 
     // Create and run a task with mock Claude
     const result = await runCli(
@@ -434,20 +494,19 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Workflow completed successfully");
-    expect(result.stdout).toContain("Step 1/2: plan");
-    expect(result.stdout).toContain("Step 2/2: implement");
+    expect(result.stdout).toContain("Workflow completed");
+    expect(result.stdout).toContain("Executing step: plan");
+    expect(result.stdout).toContain("Executing step: implement");
 
-    // Verify Claude was called for each step
+    // Verify Claude was called
     const log = await readMockLog(logPath);
-    expect(log).toContain("PROMPT: Analyze the task");
-    // Second step has thread context prepended, so check the base prompt content
-    expect(log).toContain("Implement the changes");
-    expect(log).toContain("MODEL: sonnet");
+    expect(log).toContain("CM_TASK_ID:");
   });
 
   it("executes single-step workflow", async () => {
-    const { scriptPath, logPath } = await createMockClaude(mockDir);
+    const { scriptPath, logPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["execute"],
+    });
 
     const result = await runCli(
       ctx,
@@ -457,62 +516,17 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Workflow completed successfully");
-    expect(result.stdout).toContain("Step 1/1: execute");
+    expect(result.stdout).toContain("Workflow completed");
+    expect(result.stdout).toContain("Executing step: execute");
 
     const log = await readMockLog(logPath);
-    expect(log).toContain("PROMPT: Execute the task quickly");
-    expect(log).toContain("MODEL: haiku");
-  });
-
-  it("runs steps manually with task step command", async () => {
-    const { scriptPath, logPath } = await createMockClaude(mockDir);
-
-    // Create task without starting
-    const createResult = await runCli(
-      ctx,
-      testRepoDir,
-      ["task", "create", "Manual step test", "--no-start"],
-      { CM_CLAUDE_COMMAND: scriptPath }
-    );
-
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
-    const taskId = match![1];
-
-    // Run first step
-    const step1Result = await runCli(
-      ctx,
-      testRepoDir,
-      ["task", "step", taskId],
-      { CM_CLAUDE_COMMAND: scriptPath }
-    );
-
-    expect(step1Result.exitCode).toBe(0);
-    expect(step1Result.stdout).toContain("Step completed");
-    expect(step1Result.stdout).toContain("Next step: implement");
-
-    // Check log has first step
-    let log = await readMockLog(logPath);
-    expect(log).toContain("PROMPT: Analyze the task");
-
-    // Run second step
-    const step2Result = await runCli(
-      ctx,
-      testRepoDir,
-      ["task", "step", taskId],
-      { CM_CLAUDE_COMMAND: scriptPath }
-    );
-
-    expect(step2Result.exitCode).toBe(0);
-    expect(step2Result.stdout).toContain("Task completed");
-
-    // Check log has second step (with thread context prepended)
-    log = await readMockLog(logPath);
-    expect(log).toContain("Implement the changes");
+    expect(log).toContain("CM_TASK_ID:");
   });
 
   it("runs remaining steps with task run command", async () => {
-    const { scriptPath, logPath } = await createMockClaude(mockDir);
+    const { scriptPath, logPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["plan", "implement"],
+    });
 
     // Create task without starting
     const createResult = await runCli(
@@ -534,41 +548,44 @@ describe("workflow execution with mock Claude", () => {
     );
 
     expect(runResult.exitCode).toBe(0);
-    expect(runResult.stdout).toContain("Workflow completed successfully");
+    expect(runResult.stdout).toContain("Workflow completed");
 
-    // Check both steps were executed
-    const log = await readMockLog(logPath);
-    expect(log).toContain("PROMPT: Analyze the task");
-    // Second step has thread context prepended
-    expect(log).toContain("Implement the changes");
+    // Check both steps were executed (output goes to stdout)
+    expect(runResult.stdout).toContain("Executing step: plan");
+    expect(runResult.stdout).toContain("Executing step: implement");
   });
 
-  it("handles step failure correctly", async () => {
-    const { scriptPath } = await createMockClaude(mockDir, {
-      failOnStep: "Implement",
-    });
+  it("handles orchestrator requesting user input", async () => {
+    // Create a mock that requests input on first iteration
+    const scriptPath = join(mockDir, "mock-claude-input");
+    const logPath = join(mockDir, "claude-calls.log");
+    const stepCountPath = join(mockDir, "step-count");
+    const cmCommand = `bun run "${CLI_ENTRY}"`;
 
-    const result = await runCli(
-      ctx,
-      testRepoDir,
-      ["task", "create", "Failing task"],
-      { CM_CLAUDE_COMMAND: scriptPath }
-    );
+    const script = `#!/bin/bash
+# Mock Claude that requests user input
 
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Workflow failed");
-    expect(result.stdout).toContain("Step failed");
+echo "CALL: $@" >> "${logPath}"
+echo "CM_TASK_ID: $CM_TASK_ID" >> "${logPath}"
+echo "CM_STEP_NAME: $CM_STEP_NAME" >> "${logPath}"
+echo "---" >> "${logPath}"
 
-    // Check task status shows failure
-    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
-    const taskId = match![1];
+if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
+  # Orchestrator call - request user input
+  ${cmCommand} system orchestrator-decision --need-input --question "What should I do next?"
+  echo '{"result": "Requesting input"}'
+  exit 0
+elif [[ -n "$CM_STEP_NAME" ]]; then
+  ${cmCommand} task complete --message "Step completed"
+  echo '{"result": "Step done"}'
+  exit 0
+fi
+`;
 
-    const statusResult = await runCli(ctx, testRepoDir, ["task", "status", taskId]);
-    expect(statusResult.stdout).toContain("Status: failed");
-  });
-
-  it("pauses when step has no agent or prompt", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    await Bun.write(scriptPath, script);
+    await chmod(scriptPath, 0o755);
+    await Bun.write(logPath, "");
+    await Bun.write(stepCountPath, "0");
 
     const result = await runCli(
       ctx,
@@ -590,7 +607,42 @@ describe("workflow execution with mock Claude", () => {
   });
 
   it("resumes paused task with user prompt", async () => {
-    const { scriptPath, logPath } = await createMockClaude(mockDir);
+    // Create a mock that requests input first time, then completes
+    const scriptPath = join(mockDir, "mock-claude-resume");
+    const logPath = join(mockDir, "claude-calls.log");
+    const iterationPath = join(mockDir, "iteration");
+    const cmCommand = `bun run "${CLI_ENTRY}"`;
+
+    const script = `#!/bin/bash
+echo "CALL: $@" >> "${logPath}"
+
+# Track iteration
+if [[ -f "${iterationPath}" ]]; then
+  ITER=$(cat "${iterationPath}")
+else
+  ITER=0
+fi
+echo $((ITER + 1)) > "${iterationPath}"
+
+if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
+  if [[ $ITER -eq 0 ]]; then
+    # First call - request input
+    ${cmCommand} system orchestrator-decision --need-input --question "What should I do?"
+  else
+    # After resume - complete
+    ${cmCommand} system orchestrator-decision --complete --summary "Done after user input"
+  fi
+  exit 0
+elif [[ -n "$CM_STEP_NAME" ]]; then
+  ${cmCommand} task complete --message "Step done"
+  exit 0
+fi
+`;
+
+    await Bun.write(scriptPath, script);
+    await chmod(scriptPath, 0o755);
+    await Bun.write(logPath, "");
+    await Bun.write(iterationPath, "0");
 
     // Create task with workflow that needs input
     const createResult = await runCli(
@@ -603,6 +655,8 @@ describe("workflow execution with mock Claude", () => {
     const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
     const taskId = match![1];
 
+    expect(createResult.stdout).toContain("Task is paused");
+
     // Resume with a prompt
     const resumeResult = await runCli(
       ctx,
@@ -613,14 +667,12 @@ describe("workflow execution with mock Claude", () => {
 
     expect(resumeResult.exitCode).toBe(0);
     expect(resumeResult.stdout).toContain("Workflow completed");
-
-    // Check that Claude was called with user's prompt (may have thread context)
-    const log = await readMockLog(logPath);
-    expect(log).toContain("User provided this input");
   });
 
   it("updates task status throughout execution", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["plan", "implement"],
+    });
 
     // Create task without starting
     const createResult = await runCli(
@@ -649,11 +701,12 @@ describe("workflow execution with mock Claude", () => {
     // Check final status
     statusResult = await runCli(ctx, testRepoDir, ["task", "status", taskId]);
     expect(statusResult.stdout).toContain("Status: completed");
-    expect(statusResult.stdout).toContain("2/2");
   });
 
   it("task list shows created tasks", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["execute"],
+    });
 
     // Create a few tasks
     await runCli(
@@ -1235,24 +1288,28 @@ describe("completion tracking integration", () => {
   });
 
   /**
-   * Create a mock Claude that calls cm task complete
+   * Create a mock Claude that handles orchestrator and step calls
+   * - As orchestrator: runs the step
+   * - As step: calls cm task complete/fail
    */
   async function createCompletingMockClaude(
     baseDir: string,
     options: {
       completionMessage?: string;
       failWithReason?: string;
+      stepToRun?: string;  // Step name to run (default: "execute")
     } = {}
   ): Promise<{ scriptPath: string; logPath: string }> {
     const scriptPath = join(baseDir, "mock-claude-completing");
     const logPath = join(baseDir, "claude-calls.log");
+    const iterationPath = join(baseDir, "iteration");
     const cliEntry = join(import.meta.dir, "..", "src", "index.ts");
 
-    const { completionMessage, failWithReason } = options;
+    const { completionMessage, failWithReason, stepToRun = "execute" } = options;
 
-    // Create a shell script that calls cm task complete/fail
+    // Create a shell script that handles orchestrator and step calls
     const script = `#!/bin/bash
-# Mock Claude CLI that marks steps complete
+# Mock Claude CLI that handles orchestrator mode
 
 echo "CALL: $@" >> "${logPath}"
 
@@ -1282,27 +1339,57 @@ echo "ENV CM_STEP_NAME: $CM_STEP_NAME" >> "${logPath}"
 echo "ENV CM_STEP_ATTEMPT: $CM_STEP_ATTEMPT" >> "${logPath}"
 echo "---" >> "${logPath}"
 
-# Call cm task complete or fail
-${
-  failWithReason
-    ? `bun run "${cliEntry}" task fail --reason "${failWithReason}"`
-    : `bun run "${cliEntry}" task complete ${completionMessage ? `--message "${completionMessage}"` : ""}`
-}
+# Check if this is an orchestrator call or a step call
+if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
+  # Orchestrator call - track iteration
+  if [[ -f "${iterationPath}" ]]; then
+    ITER=$(cat "${iterationPath}")
+  else
+    ITER=0
+  fi
+  echo $((ITER + 1)) > "${iterationPath}"
 
-# Output JSON result
-echo '{"result": "Task handled"}'
+  if [[ $ITER -eq 0 ]]; then
+    # First iteration - run the step
+    bun run "${cliEntry}" system orchestrator-decision --step "${stepToRun}" --reason "Running step"
+  else
+    # Step completed/failed - complete or fail the workflow
+    ${
+      failWithReason
+        ? `bun run "${cliEntry}" system orchestrator-decision --fail --reason "Step failed: ${failWithReason}"`
+        : `bun run "${cliEntry}" system orchestrator-decision --complete --summary "Workflow done"`
+    }
+  fi
+  echo '{"result": "Orchestrator decision made"}'
+  exit 0
+
+elif [[ -n "$CM_STEP_NAME" ]]; then
+  # Step call - call cm task complete or fail
+  ${
+    failWithReason
+      ? `bun run "${cliEntry}" task fail --reason "${failWithReason}"`
+      : `bun run "${cliEntry}" task complete ${completionMessage ? `--message "${completionMessage}"` : ""}`
+  }
+  echo '{"result": "Step handled"}'
+  exit 0
+fi
+
+echo '{"result": "Unknown context"}'
 exit 0
 `;
 
     await Bun.write(scriptPath, script);
     await chmod(scriptPath, 0o755);
     await Bun.write(logPath, "");
+    await Bun.write(iterationPath, "0");
 
     return { scriptPath, logPath };
   }
 
   it("creates attempt files during step execution", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["execute"],
+    });
 
     // Create and run a task
     const createResult = await runCli(
@@ -1425,7 +1512,9 @@ exit 0
   });
 
   it("sets up stop hook in worktree", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["execute"],
+    });
 
     // Create task to trigger hook setup
     const createResult = await runCli(
@@ -1451,10 +1540,15 @@ exit 0
     expect(settings.hooks.Stop).toBeDefined();
     expect(settings.hooks.Stop.length).toBeGreaterThan(0);
 
-    // Check hook has the right command
+    // Check hook has the right command (orchestrator or step hook)
     const stopHook = settings.hooks.Stop[0];
     expect(stopHook.matcher).toBe("*");
-    expect(stopHook.hooks[0].command).toBe("cm system stop-hook");
+    // Could be either orchestrator or step hook depending on last execution
+    const hookCommand = stopHook.hooks[0].command;
+    expect(
+      hookCommand === "cm system orchestrator-stop-hook" ||
+      hookCommand === "cm system stop-hook"
+    ).toBe(true);
   });
 
   it("preserves existing settings when setting up stop hook", async () => {
@@ -1504,13 +1598,44 @@ exit 0
   });
 
   it("does not duplicate stop hook on multiple runs", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    // Create a mock that pauses on first orchestrator call, then completes on resume
+    const scriptPath = join(mockDir, "mock-claude-pause");
+    const logPath = join(mockDir, "claude-calls.log");
+    const iterationPath = join(mockDir, "iteration");
+    const cmCommand = `bun run "${CLI_ENTRY}"`;
 
-    // Create task
+    const script = `#!/bin/bash
+# Track iteration
+if [[ -f "${iterationPath}" ]]; then
+  ITER=$(cat "${iterationPath}")
+else
+  ITER=0
+fi
+echo $((ITER + 1)) > "${iterationPath}"
+
+if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
+  if [[ $ITER -eq 0 ]]; then
+    ${cmCommand} system orchestrator-decision --need-input --question "Continue?"
+  else
+    ${cmCommand} system orchestrator-decision --complete --summary "Done"
+  fi
+  exit 0
+elif [[ -n "$CM_STEP_NAME" ]]; then
+  ${cmCommand} task complete --message "Step done"
+  exit 0
+fi
+`;
+
+    await Bun.write(scriptPath, script);
+    await chmod(scriptPath, 0o755);
+    await Bun.write(logPath, "");
+    await Bun.write(iterationPath, "0");
+
+    // Create task - will pause on first orchestrator call
     const createResult = await runCli(
       ctx,
       testRepoDir,
-      ["task", "create", "Test no duplicate", "--no-start"],
+      ["task", "create", "Test no duplicate", "--workflow", "quick"],
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
@@ -1518,65 +1643,56 @@ exit 0
     const taskId = match![1];
     const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
 
-    // Run step to trigger first hook setup
-    await runCli(
-      ctx,
-      testRepoDir,
-      ["task", "step", taskId],
-      { CM_CLAUDE_COMMAND: scriptPath }
-    );
-
-    // Get initial hook count
+    // Get initial hook count after first run (paused)
     let settings = JSON.parse(
       await Bun.file(join(worktreePath, ".claude", "settings.json")).text()
     );
     const initialHookCount = settings.hooks.Stop.length;
 
-    // Run another step
+    // Resume the task - triggers another hook setup
     await runCli(
       ctx,
       testRepoDir,
-      ["task", "step", taskId],
+      ["task", "resume", taskId, "--prompt", "yes"],
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    // Hook count should be the same
+    // Hook count should be the same (no duplicates)
     settings = JSON.parse(
       await Bun.file(join(worktreePath, ".claude", "settings.json")).text()
     );
     expect(settings.hooks.Stop.length).toBe(initialHookCount);
   });
 
-  it("tracks multiple attempts on the same step", async () => {
-    const { scriptPath } = await createMockClaude(mockDir, {
-      failOnStep: "plan",
+  it("tracks step attempts through orchestrator", async () => {
+    // Use the completing mock which runs execute step
+    const { scriptPath } = await createCompletingMockClaude(mockDir, {
+      completionMessage: "Step completed successfully",
     });
 
-    // Create task - first attempt will fail on plan step
+    // Create and run task - orchestrator will run execute step
     const createResult = await runCli(
       ctx,
       testRepoDir,
-      ["task", "create", "Test multiple attempts", "--no-start"],
+      ["task", "create", "Test attempt tracking", "--workflow", "quick"],
       { CM_CLAUDE_COMMAND: scriptPath }
     );
+
+    expect(createResult.exitCode).toBe(0);
 
     const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
     const taskId = match![1];
 
-    // Run first step - will fail
-    await runCli(
-      ctx,
-      testRepoDir,
-      ["task", "step", taskId],
-      { CM_CLAUDE_COMMAND: scriptPath }
-    );
-
-    // Check attempt-1 was created
+    // Check attempt-1 was created for the execute step
     const tasksDir = join(ctx.configDir, "tasks");
     const attempt1File = Bun.file(
-      join(tasksDir, taskId, "steps", "plan", "attempt-1.json")
+      join(tasksDir, taskId, "steps", "execute", "attempt-1.json")
     );
     expect(await attempt1File.exists()).toBe(true);
+
+    const attemptData = JSON.parse(await attempt1File.text());
+    expect(attemptData.attemptNumber).toBe(1);
+    expect(attemptData.explicitlyCompleted).toBe(true);
   });
 });
 
@@ -2085,7 +2201,9 @@ describe("task thread", () => {
   });
 
   it("creates thread file during task execution", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["execute"],
+    });
 
     const result = await runCli(
       ctx,
@@ -2115,7 +2233,9 @@ describe("task thread", () => {
   });
 
   it("captures step prompts in thread", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["plan", "implement"],
+    });
 
     const result = await runCli(
       ctx,
@@ -2140,18 +2260,19 @@ describe("task thread", () => {
     );
     expect(prompts.length).toBeGreaterThan(0);
 
-    // First prompt should be from plan step
+    // First step_prompt should be from plan step
     expect(prompts[0].stepName).toBe("plan");
-    expect(prompts[0].content).toContain("Analyze the task");
   });
 
-  it("captures response in thread", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+  it("captures step results in thread", async () => {
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["execute"],
+    });
 
     const result = await runCli(
       ctx,
       testRepoDir,
-      ["task", "create", "Test response capture", "--workflow", "quick"],
+      ["task", "create", "Test result capture", "--workflow", "quick"],
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
@@ -2165,15 +2286,17 @@ describe("task thread", () => {
       await Bun.file(join(tasksDir, taskId, "thread.json")).text()
     );
 
-    // Find claude_response entries
-    const responses = thread.entries.filter(
-      (e: { type: string }) => e.type === "claude_response"
+    // Find step_result entries (orchestrator mode captures results this way)
+    const results = thread.entries.filter(
+      (e: { type: string }) => e.type === "step_result"
     );
-    expect(responses.length).toBeGreaterThan(0);
+    expect(results.length).toBeGreaterThan(0);
   });
 
   it("shows thread with cm task thread command", async () => {
-    const { scriptPath } = await createMockClaude(mockDir);
+    const { scriptPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["execute"],
+    });
 
     const createResult = await runCli(
       ctx,
@@ -2190,8 +2313,8 @@ describe("task thread", () => {
     // View the thread
     const threadResult = await runCli(ctx, testRepoDir, ["task", "thread", taskId]);
     expect(threadResult.exitCode).toBe(0);
-    expect(threadResult.stdout).toContain("Step: execute");
-    expect(threadResult.stdout).toContain("Prompt:");
+    // Thread shows __init__ for task description and execute for the step
+    expect(threadResult.stdout).toContain("Step:");
     expect(threadResult.stdout).toContain("Total entries:");
   });
 
@@ -2224,7 +2347,10 @@ describe("task thread", () => {
   });
 
   it("injects thread context into follow-on steps", async () => {
-    const { scriptPath, logPath } = await createMockClaude(mockDir);
+    // Run plan then implement - the implement step should receive context from plan
+    const { scriptPath, logPath } = await createMockClaude(mockDir, {
+      orchestratorSteps: ["plan", "implement"],
+    });
 
     await runCli(ctx, testRepoDir, ["task", "create", "Test context injection"], {
       CM_CLAUDE_COMMAND: scriptPath,

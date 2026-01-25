@@ -102,8 +102,8 @@ describe("cm init", () => {
     expect(cmYml).toContain('version: "1"');
     expect(cmYml).toContain("workflows:");
     expect(cmYml).toContain("default:");
+    expect(cmYml).toContain("prompt:");  // Orchestrator prompt
     expect(cmYml).toContain("name: plan");
-    expect(cmYml).toContain("name: plan-review");
     expect(cmYml).toContain("name: execute");
     expect(cmYml).toContain("name: review");
   });

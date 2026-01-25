@@ -101,6 +101,13 @@ function validateStep(raw: RawWorkflowStep, index: number): WorkflowStep {
  * Validate and normalize a workflow
  */
 function validateWorkflow(raw: RawWorkflow, name: string): Workflow {
+  // Require prompt field for orchestrator
+  if (!raw.prompt || typeof raw.prompt !== "string") {
+    throw new ConfigValidationError(
+      `Workflow "${name}" must have a "prompt" field with orchestrator instructions`
+    );
+  }
+
   if (!raw.steps || !Array.isArray(raw.steps)) {
     throw new ConfigValidationError(
       `Workflow "${name}" must have a "steps" array`
@@ -126,7 +133,22 @@ function validateWorkflow(raw: RawWorkflow, name: string): Workflow {
     stepNames.add(step.name);
   }
 
-  return { steps };
+  // Validate model if provided
+  const workflow: Workflow = {
+    prompt: raw.prompt,
+    steps,
+  };
+
+  if (raw.model !== undefined) {
+    if (!VALID_MODELS.includes(raw.model as Model)) {
+      throw new ConfigValidationError(
+        `Workflow "${name}" has invalid model "${raw.model}". Valid models: ${VALID_MODELS.join(", ")}`
+      );
+    }
+    workflow.model = raw.model as Model;
+  }
+
+  return workflow;
 }
 
 /**

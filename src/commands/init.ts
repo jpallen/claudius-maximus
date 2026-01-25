@@ -94,64 +94,49 @@ const CM_YML_CONTENT = `# Claudius Maximus Workflow Configuration
 version: "1"
 
 workflows:
-  # Default workflow: plan -> review -> execute -> review
+  # Default workflow: Claude orchestrates plan -> review -> execute -> review cycle
   default:
+    prompt: |
+      Plan first, then have the review agent review the plan.
+      Go back and forth with the plan agent until the review agent is happy.
+      Then execute, and review the execution.
+      Iterate until the review agent is satisfied with the implementation.
+      Ask for user input for any ambiguous review feedback.
     steps:
       - name: plan
         agent: planning-agent
-        prompt: |
-          Create a detailed implementation plan for the following task:
-
-          {description}
-
-      - name: plan-review
-        agent: review-agent
-        prompt: |
-          Review the implementation plan created in the previous step.
-          If the plan needs changes, clearly specify what needs to be fixed.
-          If the plan is good, approve it and summarize the key points.
+        prompt: Create or refine the implementation plan based on feedback.
 
       - name: execute
         agent: execution-agent
-        prompt: |
-          Implement the approved plan from the planning phase.
-          Follow the plan step by step. Write clean, tested code.
+        prompt: Implement based on the approved plan.
 
       - name: review
         agent: review-agent
-        prompt: |
-          Review the implementation completed in the previous step.
-          Verify all planned steps were completed, code quality meets standards,
-          tests pass, and there are no obvious bugs or issues.
+        prompt: Critically review the current state and provide actionable feedback.
 
   # Quick workflow for simple tasks
   quick:
+    prompt: |
+      This is a simple task. Execute it directly without extensive planning.
+      Complete it in one step if possible.
     steps:
       - name: execute
-        prompt: |
-          Complete the following task:
-
-          {description}
-
-          This is a simple task - implement it directly without extensive planning.
+        prompt: Complete the task directly.
 
   # Plan-only workflow for complex analysis
   plan-only:
+    prompt: |
+      Create a comprehensive implementation plan. Have the review agent
+      review it and iterate until the plan is solid. Do not execute.
     steps:
       - name: plan
         agent: planning-agent
-        prompt: |
-          Analyze the following task and create a comprehensive implementation plan:
+        prompt: Create a thorough implementation plan.
 
-          {description}
-
-          Be thorough - this plan will be reviewed and executed later.
-
-      - name: plan-review
+      - name: review
         agent: review-agent
-        prompt: |
-          Critically review the implementation plan.
-          Identify any gaps, risks, or improvements needed.
+        prompt: Review the plan and provide feedback.
 `;
 
 /** Handle errors consistently */

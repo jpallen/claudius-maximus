@@ -21,7 +21,11 @@ export interface WorkflowStep {
 
 /** A complete workflow definition */
 export interface Workflow {
-  /** Workflow steps to execute in order */
+  /** Orchestrator prompt - instructions for Claude on how to orchestrate the workflow */
+  prompt: string;
+  /** Model to use for the orchestrator (default: opus) */
+  model?: Model;
+  /** Available steps that the orchestrator can invoke */
   steps: WorkflowStep[];
 }
 
@@ -52,6 +56,8 @@ export interface RawWorkflowStep {
 
 /** Raw YAML structure for a workflow (before validation) */
 export interface RawWorkflow {
+  prompt?: string;
+  model?: string;
   steps?: RawWorkflowStep[];
 }
 

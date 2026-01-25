@@ -157,11 +157,21 @@ export interface CreateTaskOptions {
 
 /** Types of entries in a task thread */
 export type ThreadEntryType =
-  | "step_prompt"      // Prompt sent to Claude
-  | "claude_response"  // Claude's output/completion message
-  | "user_question"    // AskUserQuestion question
-  | "user_answer"      // User's answer
-  | "resume_prompt";   // User resume input
+  | "task_description"      // Initial task description
+  | "step_prompt"           // Prompt sent to Claude for a step
+  | "claude_response"       // Claude's output/completion message
+  | "user_question"         // AskUserQuestion question
+  | "user_answer"           // User's answer
+  | "resume_prompt"         // User resume input
+  | "orchestrator_decision" // Orchestrator's decision
+  | "step_result";          // Result from a step execution
+
+/** Orchestrator decision types */
+export type OrchestratorDecision =
+  | { type: "run_step"; stepName: string; reason?: string }
+  | { type: "need_input"; question: string }
+  | { type: "complete"; summary: string }
+  | { type: "fail"; reason: string };
 
 /** A single entry in the task thread */
 export interface ThreadEntry {

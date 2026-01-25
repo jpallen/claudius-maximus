@@ -27,7 +27,7 @@ import type {
   TaskThread,
   ThreadEntry,
   ThreadEntryType,
-  PendingQuestion,
+  OrchestratorDecision,
 } from "./types";
 import type { Workflow } from "../workflow/types";
 
@@ -80,6 +80,11 @@ function getAttemptPath(taskId: string, stepName: string, attempt: number): stri
 /** Get the thread file path */
 function getThreadPath(taskId: string): string {
   return join(getTaskDir(taskId), "thread.json");
+}
+
+/** Get the orchestrator decision file path */
+function getOrchestratorDecisionPath(taskId: string): string {
+  return join(getTaskDir(taskId), "orchestrator-decision.json");
 }
 
 /**
@@ -248,6 +253,14 @@ export async function createTask(
 
   await saveTask(task);
 
+  // Initialize thread with task description
+  await appendThreadEntry(taskId, {
+    type: "task_description",
+    stepName: "__init__",
+    attemptNumber: 0,
+    content: options.description,
+  });
+
   return task;
 }
 
@@ -359,7 +372,7 @@ export async function startTask(taskId: string): Promise<Task> {
  */
 export async function pauseTask(
   taskId: string,
-  pendingQuestion?: PendingQuestion
+  reason?: string
 ): Promise<Task> {
   const task = await loadTask(taskId);
 
@@ -368,20 +381,9 @@ export async function pauseTask(
   }
 
   task.status = "paused";
-  task.pendingQuestion = pendingQuestion;
 
   await saveTask(task);
 
-  return task;
-}
-
-/**
- * Clear the pending question from a task
- */
-export async function clearPendingQuestion(taskId: string): Promise<Task> {
-  const task = await loadTask(taskId);
-  task.pendingQuestion = undefined;
-  await saveTask(task);
   return task;
 }
 
@@ -628,4 +630,46 @@ export async function appendThreadEntry(
   await saveThread(taskId, thread);
 
   return fullEntry;
+}
+
+/**
+ * Save an orchestrator decision to disk
+ */
+export async function saveOrchestratorDecision(
+  taskId: string,
+  decision: OrchestratorDecision
+): Promise<void> {
+  const decisionPath = getOrchestratorDecisionPath(taskId);
+  const taskDir = getTaskDir(taskId);
+  await mkdir(taskDir, { recursive: true });
+  await Bun.write(decisionPath, JSON.stringify(decision, null, 2));
+}
+
+/**
+ * Load an orchestrator decision from disk
+ */
+export async function loadOrchestratorDecision(
+  taskId: string
+): Promise<OrchestratorDecision | null> {
+  const decisionPath = getOrchestratorDecisionPath(taskId);
+  const file = Bun.file(decisionPath);
+
+  if (!(await file.exists())) {
+    return null;
+  }
+
+  const content = await file.text();
+  return JSON.parse(content) as OrchestratorDecision;
+}
+
+/**
+ * Clear/delete an orchestrator decision file
+ */
+export async function clearOrchestratorDecision(taskId: string): Promise<void> {
+  const decisionPath = getOrchestratorDecisionPath(taskId);
+  const file = Bun.file(decisionPath);
+
+  if (await file.exists()) {
+    await rm(decisionPath);
+  }
 }
