@@ -129,7 +129,11 @@ export function createSystemCommand(): Command {
         console.log(
           JSON.stringify({
             decision: "block",
-            reason: `Step "${stepName}" not marked complete. Run one of:\n  cm task complete --message "summary"\n  cm task fail --reason "what went wrong"`,
+            reason: `Step "${stepName}" not marked complete. Run one of:
+  cm task complete --message "<detailed context for next steps>"
+  cm task fail --reason "<detailed explanation of failure>"
+
+Remember: Your message is the ONLY context the next step will see.`,
           })
         );
 
@@ -139,7 +143,11 @@ export function createSystemCommand(): Command {
         console.log(
           JSON.stringify({
             decision: "block",
-            reason: `Cannot verify step completion: ${(error as Error).message}. Run one of:\n  cm task complete --message "summary"\n  cm task fail --reason "what went wrong"`,
+            reason: `Cannot verify step completion: ${(error as Error).message}. Run one of:
+  cm task complete --message "<detailed context for next steps>"
+  cm task fail --reason "<detailed explanation of failure>"
+
+Remember: Your message is the ONLY context the next step will see.`,
           })
         );
 

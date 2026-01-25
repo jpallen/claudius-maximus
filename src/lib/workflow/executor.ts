@@ -205,10 +205,48 @@ Your current working directory is a git worktree created for this task. Treat th
 
 You are running step "${stepName}". Before finishing, you MUST run one of:
 
-- **Success**: \`cm task complete --message "summary of what was done"\`
-- **Failure**: \`cm task fail --reason "what went wrong"\`
+- **Success**: \`cm task complete --message "detailed context for next steps"\`
+- **Failure**: \`cm task fail --reason "detailed explanation of what went wrong"\`
 
 You will be blocked from exiting until you run one of these commands.
+
+## CRITICAL: Your Message is the ONLY Context for Next Steps
+
+**The completion message is the ONLY information subsequent steps will receive from your work.** Next steps cannot see your conversation, tool calls, or any files you read - they ONLY see your completion message.
+
+Your message must include ALL context needed for the workflow to continue:
+
+**For implementation/code steps:**
+- List specific files created or modified with their paths
+- Describe key changes and their purpose
+- Note any important decisions made
+- Include commit hashes if changes were committed
+
+**For review/analysis steps:**
+- Include the FULL review findings (not just a summary)
+- Provide specific file locations and line numbers for issues
+- List all issues found with severity and recommendations
+- State clearly whether the review passed or requires changes
+
+**For planning steps:**
+- Include the complete plan OR reference the plan file path
+- List all key decisions and their rationale
+- Note any assumptions or constraints identified
+
+**For research/exploration steps:**
+- Summarize all findings comprehensively
+- Include relevant code patterns discovered
+- Note file paths and locations of interest
+
+**For failure messages:**
+- Explain what you were trying to do
+- Describe what went wrong in detail
+- Include any error messages or stack traces
+- Suggest possible remediation steps if known
+
+If your work produced a document (plan, review, etc.), either:
+1. Include the full content in the message, OR
+2. Write it to a file and include the file path with a summary of key points
 `.trim();
 }
 
