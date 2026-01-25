@@ -107,9 +107,16 @@ export function generateTaskId(
 
 /**
  * Validate that a string is a valid task ID format
+ * Accepts both:
+ * - Original adjective-noun format: swift-falcon, brave-tiger-2
+ * - New semantic format: implement-auth, fix-pagination-bug-3
  */
 export function isValidTaskId(id: string): boolean {
-  // Allow adjective-noun or adjective-noun-number patterns
-  const pattern = /^[a-z]+-[a-z]+(-\d+)?$/;
+  // Must be non-empty and reasonable length
+  if (!id || id.length < 3 || id.length > 60) return false;
+
+  // Must be lowercase alphanumeric with hyphens
+  // Allows: word-word, word-word-word, word-word-number
+  const pattern = /^[a-z][a-z0-9]*(-[a-z0-9]+)*(-\d+)?$/;
   return pattern.test(id);
 }

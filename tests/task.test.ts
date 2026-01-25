@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { createTestContext, type TestContext } from "./helpers";
+import { createTestContext, createSimpleMockClaude, type TestContext } from "./helpers";
 import { join } from "path";
 import { mkdtemp, rm, chmod, mkdir } from "fs/promises";
 import { tmpdir } from "os";
@@ -241,15 +241,24 @@ async function runCli(
 describe("task command", () => {
   let ctx: TestContext;
   let testRepoDir: string;
+  let mockDir: string;
+  let mockClaudePath: string;
 
   beforeEach(async () => {
     ctx = await createTestContext();
     testRepoDir = await createTestRepo();
+    // Create a simple mock Claude for task creation (branch name generation)
+    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-simple-"));
+    const { scriptPath } = await createSimpleMockClaude(mockDir, {
+      output: "task-from-mock",
+    });
+    mockClaudePath = scriptPath;
   });
 
   afterEach(async () => {
     await ctx.cleanup();
     await rm(testRepoDir, { recursive: true, force: true });
+    await rm(mockDir, { recursive: true, force: true });
   });
 
   describe("task list", () => {
@@ -272,7 +281,7 @@ describe("task command", () => {
     it("creates a task without starting execution", async () => {
       const result = await runCli(ctx, testRepoDir, [
         "task", "create", "Test task description", "--no-start"
-      ]);
+      ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Creating task:");
@@ -285,7 +294,7 @@ describe("task command", () => {
     it("creates worktree in .cm-worktrees directory", async () => {
       const result = await runCli(ctx, testRepoDir, [
         "task", "create", "Test task", "--no-start"
-      ]);
+      ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain(".cm-worktrees/");
@@ -294,7 +303,7 @@ describe("task command", () => {
     it("uses custom workflow when specified", async () => {
       const result = await runCli(ctx, testRepoDir, [
         "task", "create", "Quick test", "--workflow", "quick", "--no-start"
-      ]);
+      ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Workflow: quick");
@@ -304,7 +313,7 @@ describe("task command", () => {
     it("fails with invalid workflow name", async () => {
       const result = await runCli(ctx, testRepoDir, [
         "task", "create", "Test task", "--workflow", "nonexistent", "--no-start"
-      ]);
+      ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Workflow \"nonexistent\" not found");
@@ -326,12 +335,12 @@ describe("task command", () => {
       // First create a task
       const createResult = await runCli(ctx, testRepoDir, [
         "task", "create", "Test task for status", "--no-start"
-      ]);
+      ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
       expect(createResult.exitCode).toBe(0);
 
-      // Extract task ID from output
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      // Extract task ID from output - support both old and new ID formats
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       expect(match).toBeTruthy();
       const taskId = match![1];
 
@@ -358,9 +367,9 @@ describe("task command", () => {
       // Create a task
       const createResult = await runCli(ctx, testRepoDir, [
         "task", "create", "Task to cancel", "--no-start"
-      ]);
+      ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       const taskId = match![1];
 
       // Cancel it
@@ -383,9 +392,9 @@ describe("task command", () => {
       // Create a task
       const createResult = await runCli(ctx, testRepoDir, [
         "task", "create", "Task to delete", "--no-start"
-      ]);
+      ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       const taskId = match![1];
 
       // Delete it
@@ -411,7 +420,7 @@ describe("task command", () => {
       await Bun.spawn(["git", "add", "."], { cwd: emptyRepoDir, stdout: "pipe", stderr: "pipe" }).exited;
       await Bun.spawn(["git", "commit", "-m", "Initial"], { cwd: emptyRepoDir, stdout: "pipe", stderr: "pipe" }).exited;
 
-      const result = await runCli(ctx, emptyRepoDir, ["task", "create", "Test", "--no-start"]);
+      const result = await runCli(ctx, emptyRepoDir, ["task", "create", "Test", "--no-start"], { CM_CLAUDE_COMMAND: mockClaudePath });
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("No cm.yml found");
@@ -422,7 +431,7 @@ describe("task command", () => {
     it("fails when not in a git repository", async () => {
       const nonGitDir = await mkdtemp(join(tmpdir(), "cm-non-git-"));
 
-      const result = await runCli(ctx, nonGitDir, ["task", "create", "Test", "--no-start"]);
+      const result = await runCli(ctx, nonGitDir, ["task", "create", "Test", "--no-start"], { CM_CLAUDE_COMMAND: mockClaudePath });
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Not in a git repository");
@@ -436,6 +445,10 @@ describe("task id generation", () => {
   it("generates unique IDs for multiple tasks", async () => {
     const ctx = await createTestContext();
     const testRepoDir = await createTestRepo();
+    const mockDir = await mkdtemp(join(tmpdir(), "cm-mock-id-"));
+    const { scriptPath: mockClaudePath } = await createSimpleMockClaude(mockDir, {
+      output: "task-from-mock",
+    });
     const ids: string[] = [];
 
     try {
@@ -443,11 +456,12 @@ describe("task id generation", () => {
       for (let i = 0; i < 5; i++) {
         const result = await runCli(ctx, testRepoDir, [
           "task", "create", `Task ${i}`, "--no-start"
-        ]);
+        ], { CM_CLAUDE_COMMAND: mockClaudePath });
 
         expect(result.exitCode).toBe(0);
 
-        const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+(-\d+)?)/);
+        // Match both old adjective-noun and new semantic formats
+        const match = result.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
         expect(match).toBeTruthy();
         ids.push(match![1]);
       }
@@ -458,6 +472,7 @@ describe("task id generation", () => {
     } finally {
       await ctx.cleanup();
       await rm(testRepoDir, { recursive: true, force: true });
+      await rm(mockDir, { recursive: true, force: true });
     }
   });
 });
@@ -2121,7 +2136,7 @@ describe("uncommitted changes check", () => {
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
 
@@ -2169,7 +2184,7 @@ describe("uncommitted changes check", () => {
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
 
@@ -2224,7 +2239,7 @@ describe("uncommitted changes check", () => {
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
 

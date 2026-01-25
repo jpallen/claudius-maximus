@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "fs/promises";
+import { mkdtemp, rm, chmod } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -98,4 +98,52 @@ program.parse();
   await Bun.write(join(versionDir, "package.json"), originalPkg);
 
   return versionDir;
+}
+
+/**
+ * Create a simple mock Claude script that returns a fixed output
+ * Lighter weight than createMockClaude() for branch name generation tests
+ *
+ * Uses a file-based output approach to avoid shell escaping issues with
+ * complex strings containing quotes, newlines, or special characters.
+ */
+export async function createSimpleMockClaude(
+  baseDir: string,
+  options: {
+    /** Output to return in the JSON result field */
+    output: string;
+    /** Exit code to return (default: 0) */
+    exitCode?: number;
+    /** Track invocations by touching a flag file (default: false) */
+    trackInvocations?: boolean;
+  }
+): Promise<{ scriptPath: string; invocationFlagPath?: string }> {
+  const scriptPath = join(baseDir, "simple-mock-claude");
+  const outputPath = join(baseDir, "mock-claude-output.json");
+  const invocationFlagPath = join(baseDir, "claude-was-called");
+
+  const { output, exitCode = 0, trackInvocations = false } = options;
+
+  // Write the JSON output to a file (avoids shell escaping issues)
+  const jsonOutput = JSON.stringify({ result: output });
+  await Bun.write(outputPath, jsonOutput);
+
+  // Script reads from file instead of echoing escaped string
+  // Optionally touches a flag file to track invocations
+  const script = `#!/bin/bash
+# Simple mock Claude CLI for testing
+# Reads output from a file to avoid shell escaping issues
+${trackInvocations ? `\ntouch "${invocationFlagPath}"` : ""}
+
+cat "${outputPath}"
+exit ${exitCode}
+`;
+
+  await Bun.write(scriptPath, script);
+  await chmod(scriptPath, 0o755);
+
+  return {
+    scriptPath,
+    ...(trackInvocations ? { invocationFlagPath } : {}),
+  };
 }

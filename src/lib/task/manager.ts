@@ -8,6 +8,7 @@ import { mkdir, rm } from "fs/promises";
 import { CLI_NAME } from "../constants";
 import { TaskNotFoundError, InvalidTaskStateError, InvalidBranchError } from "../errors";
 import { generateTaskId } from "./id-generator";
+import { generateBranchName, ensureUniqueBranchName } from "./branch-name-generator";
 import {
   createWorktree,
   removeWorktree,
@@ -221,9 +222,25 @@ export async function createTask(
     baseBranch = await getCurrentBranch(actualRepoPath);
   }
 
-  // Generate unique ID
+  // Get existing task IDs for uniqueness check
   const existingIds = await getExistingTaskIds();
-  const taskId = generateTaskId(existingIds);
+
+  // Generate task ID - try Claude first, fallback to random
+  let taskId: string;
+
+  // Try to generate a semantic branch name from the description
+  const generatedName = await generateBranchName(
+    options.description,
+    actualRepoPath
+  );
+
+  if (generatedName) {
+    // Ensure uniqueness
+    taskId = ensureUniqueBranchName(generatedName, existingIds);
+  } else {
+    // Fallback to original random ID generation
+    taskId = generateTaskId(existingIds);
+  }
 
   // Create worktree with base branch
   const worktreePath = await createWorktree(actualRepoPath, taskId, baseBranch);
