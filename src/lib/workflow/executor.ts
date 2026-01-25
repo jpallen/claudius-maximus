@@ -537,7 +537,7 @@ export async function executeWorkflow(
     await setupStopHook(task.worktreePath);
     await clearOrchestratorDecision(task.id);
 
-    // 3. Run Claude as orchestrator (restricted to only cm commands)
+    // 3. Run Claude as orchestrator (restricted to only Bash tool for cm commands)
     try {
       await runClaude({
         prompt,
@@ -548,7 +548,8 @@ export async function executeWorkflow(
         taskId: task.id,
         stream: opts.stream,
         onStream: opts.streamOutput,
-        allowedTools: ["Bash(cm *)"],
+        tools: ["Bash"],           // Only Bash is available
+        allowedTools: ["Bash(cm *)"],  // Keep for defense in depth
         isOrchestrator: true,
       });
     } catch (error) {

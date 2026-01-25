@@ -77,6 +77,8 @@ export interface ClaudeRunOptions {
   allowedTools?: string[];
   /** Disallowed tools */
   disallowedTools?: string[];
+  /** Restrict available tools (e.g., ["Bash"] to only make Bash visible to Claude) */
+  tools?: string[];
   /** Whether this is an orchestrator invocation (vs step execution) */
   isOrchestrator?: boolean;
 }
@@ -488,6 +490,7 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     resumeSessionId,
     allowedTools,
     disallowedTools,
+    tools,
     isOrchestrator = false,
   } = options;
 
@@ -517,7 +520,12 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     args.push("--append-system-prompt", appendSystemPrompt);
   }
 
-  // Add tool restrictions
+  // Restrict available tools (this actually limits what tools Claude can see)
+  if (tools !== undefined) {
+    args.push("--tools", tools.join(","));
+  }
+
+  // Add tool restrictions (patterns for permission system - as defense in depth)
   if (allowedTools?.length) {
     for (const tool of allowedTools) {
       args.push("--allowedTools", tool);
