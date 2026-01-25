@@ -12,15 +12,59 @@ export function createSystemCommand(): Command {
   // cm system stop-hook
   system
     .command("stop-hook")
-    .description("Called by Claude Stop hook to verify step completion")
+    .description("Called by Claude Stop hook to verify step/orchestrator completion")
     .action(async () => {
       const taskId = process.env.CM_TASK_ID;
+      const isOrchestrator = process.env.CM_ORCHESTRATOR === "true";
+
+      // Not a managed task session - allow exit
+      if (!taskId) {
+        process.exit(0);
+      }
+
+      // Handle orchestrator mode
+      if (isOrchestrator) {
+        try {
+          const decision = await loadOrchestratorDecision(taskId);
+
+          // Decision was made - allow exit
+          if (decision) {
+            process.exit(0);
+          }
+
+          // No decision - block exit with instructions
+          console.log(
+            JSON.stringify({
+              decision: "block",
+              reason: `No orchestrator decision made. Run one of:
+  cm system orchestrator-decision --step "<step-name>"
+  cm system orchestrator-decision --need-input --question "your question"
+  cm system orchestrator-decision --complete --summary "what was accomplished"
+  cm system orchestrator-decision --fail --reason "why it cannot proceed"`,
+            })
+          );
+
+          process.exit(2);
+        } catch (error) {
+          // Error loading decision - block exit as safety measure
+          console.log(
+            JSON.stringify({
+              decision: "block",
+              reason: `Cannot verify orchestrator decision: ${(error as Error).message}`,
+            })
+          );
+
+          process.exit(2);
+        }
+      }
+
+      // Handle step execution mode
       const stepName = process.env.CM_STEP_NAME;
       const attemptStr = process.env.CM_STEP_ATTEMPT;
       const worktreePath = process.env.CM_WORKTREE_PATH;
 
-      // Not a managed task session - allow exit
-      if (!taskId || !stepName || !attemptStr) {
+      // Not a managed step session - allow exit
+      if (!stepName || !attemptStr) {
         process.exit(0);
       }
 
@@ -157,52 +201,6 @@ export function createSystemCommand(): Command {
       await saveOrchestratorDecision(taskId, decision);
       console.log(JSON.stringify({ status: "recorded", decision }));
       process.exit(0);
-    });
-
-  // cm system orchestrator-stop-hook - Called by Claude Stop hook in orchestrator mode
-  system
-    .command("orchestrator-stop-hook")
-    .description("Called by Claude Stop hook in orchestrator mode")
-    .action(async () => {
-      const taskId = process.env.CM_TASK_ID;
-
-      // Not a managed orchestrator session - allow exit
-      if (!taskId) {
-        process.exit(0);
-      }
-
-      try {
-        const decision = await loadOrchestratorDecision(taskId);
-
-        // Decision was made - allow exit
-        if (decision) {
-          process.exit(0);
-        }
-
-        // No decision - block exit with instructions
-        console.log(
-          JSON.stringify({
-            decision: "block",
-            reason: `No orchestrator decision made. Run one of:
-  cm system orchestrator-decision --step "<step-name>"
-  cm system orchestrator-decision --need-input --question "your question"
-  cm system orchestrator-decision --complete --summary "what was accomplished"
-  cm system orchestrator-decision --fail --reason "why it cannot proceed"`,
-          })
-        );
-
-        process.exit(2);
-      } catch (error) {
-        // Error loading decision - block exit as safety measure
-        console.log(
-          JSON.stringify({
-            decision: "block",
-            reason: `Cannot verify orchestrator decision: ${(error as Error).message}`,
-          })
-        );
-
-        process.exit(2);
-      }
     });
 
   return system;

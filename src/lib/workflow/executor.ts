@@ -25,7 +25,7 @@ import {
   clearOrchestratorDecision,
 } from "../task/manager";
 import { formatThreadForContext } from "../task/thread-formatter";
-import { setupStopHook, setupOrchestratorStopHook } from "../task/hooks";
+import { setupStopHook } from "../task/hooks";
 import { StepTimeoutError, ClaudeExecutionError } from "../errors";
 
 /** Result of executing a single step */
@@ -491,8 +491,8 @@ export async function executeWorkflow(
     // 1. Build orchestrator prompt
     const prompt = await buildOrchestratorPrompt(task, workflow);
 
-    // 2. Setup orchestrator stop hook and clear previous decision
-    await setupOrchestratorStopHook(task.worktreePath);
+    // 2. Setup stop hook and clear previous decision
+    await setupStopHook(task.worktreePath);
     await clearOrchestratorDecision(task.id);
 
     // 3. Run Claude as orchestrator (restricted to only cm commands)
@@ -507,6 +507,7 @@ export async function executeWorkflow(
         stream: opts.stream,
         onStream: opts.streamOutput,
         allowedTools: ["Bash(cm *)"],
+        isOrchestrator: true,
       });
     } catch (error) {
       const errorMsg =

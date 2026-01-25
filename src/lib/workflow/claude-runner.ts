@@ -79,6 +79,8 @@ export interface ClaudeRunOptions {
   allowedTools?: string[];
   /** Disallowed tools */
   disallowedTools?: string[];
+  /** Whether this is an orchestrator invocation (vs step execution) */
+  isOrchestrator?: boolean;
 }
 
 /**
@@ -488,6 +490,7 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     resumeSessionId,
     allowedTools,
     disallowedTools,
+    isOrchestrator = false,
   } = options;
 
   // Build command arguments
@@ -549,6 +552,11 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
   // Add worktree path for stop-hook to check uncommitted changes
   if (cwd) {
     env.CM_WORKTREE_PATH = cwd;
+  }
+
+  // Mark orchestrator invocations for stop-hook detection
+  if (isOrchestrator) {
+    env.CM_ORCHESTRATOR = "true";
   }
 
   // Start the process
