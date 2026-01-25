@@ -2,7 +2,7 @@
  * Workflow step executor
  */
 
-import type { Task, StepAttempt } from "../task/types";
+import type { Task, StepAttempt, PendingQuestion } from "../task/types";
 import type { CmConfig, Workflow, WorkflowStep } from "./types";
 import { runClaude, parseClaudeOutput, type ClaudeResult } from "./claude-runner";
 import {
@@ -18,6 +18,7 @@ import {
   loadAttempt,
   loadThread,
   appendThreadEntry,
+  clearPendingQuestion,
 } from "../task/manager";
 import { formatThreadForContext } from "../task/thread-formatter";
 import { setupStopHook } from "../task/hooks";
@@ -35,6 +36,8 @@ export interface StepResult {
   error?: string;
   /** Duration in milliseconds */
   durationMs?: number;
+  /** Pending question if AskUserQuestion was denied */
+  pendingQuestion?: PendingQuestion;
 }
 
 /** Result of executing a workflow */
@@ -47,6 +50,8 @@ export interface WorkflowResult {
   stepsCompleted: number;
   /** Total duration in milliseconds */
   durationMs?: number;
+  /** Pending question if task is paused for AskUserQuestion */
+  pendingQuestion?: PendingQuestion;
 }
 
 /** Options for controlling execution output */
@@ -104,6 +109,11 @@ function buildStepPrompt(
   task: Task,
   isResuming: boolean
 ): string | null {
+  // If we're resuming with an answer to a pending question, format it appropriately
+  if (isResuming && task.resumePrompt && task.pendingQuestion) {
+    return `The user answered: "${task.resumePrompt}"`;
+  }
+
   // If we're resuming and there's a resume prompt, use it
   if (isResuming && task.resumePrompt) {
     return task.resumePrompt;
@@ -224,6 +234,11 @@ async function executeStep(
     });
   };
 
+  // Get resumeSessionId if resuming with a pending question
+  const resumeSessionId = isResuming && task.pendingQuestion
+    ? task.pendingQuestion.claudeSessionId
+    : undefined;
+
   try {
     // Run Claude CLI with task context for completion tracking
     const result: ClaudeResult = await runClaude({
@@ -240,7 +255,27 @@ async function executeStep(
       stream: stream,
       onStream: streamOutput,
       onQuestionAnswer,
+      resumeSessionId,
     });
+
+    // Clear pending question if we were resuming with an answer
+    if (resumeSessionId) {
+      await clearPendingQuestion(task.id);
+    }
+
+    // Check if Claude asked a question that was denied
+    if (result.pendingQuestion) {
+      if (verbose && log) {
+        log(`\n${"─".repeat(60)}`);
+        log(`Claude is asking a question...`);
+      }
+      return {
+        success: true,
+        shouldPause: true,
+        pendingQuestion: result.pendingQuestion,
+        durationMs: Date.now() - startTime,
+      };
+    }
 
     const durationMs = Date.now() - startTime;
 
@@ -466,9 +501,10 @@ export async function executeNextStep(
     isResuming
   );
 
-  // Clear resume prompt after using it
-  if (task.resumePrompt) {
+  // Clear resume prompt and pending question after using them
+  if (task.resumePrompt || task.pendingQuestion) {
     task.resumePrompt = undefined;
+    task.pendingQuestion = undefined;
     await updateTask(task);
   }
 
@@ -509,12 +545,13 @@ export async function executeWorkflow(
     }
 
     if (result.shouldPause) {
-      // Pause the task
-      await pauseTask(task.id);
+      // Pause the task with pending question if present
+      await pauseTask(task.id, result.pendingQuestion);
       return {
         status: "paused",
         stepsCompleted,
         durationMs: Date.now() - startTime,
+        pendingQuestion: result.pendingQuestion,
       };
     }
 

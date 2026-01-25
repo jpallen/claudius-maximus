@@ -4,6 +4,7 @@
 
 import { ClaudeExecutionError, StepTimeoutError } from "../errors";
 import type { Model } from "./types";
+import type { PendingQuestion, QuestionDetail } from "../task/types";
 
 /** Default timeout: 5 minutes */
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -28,6 +29,10 @@ export interface ClaudeResult {
   stderr: string;
   /** Whether execution was successful */
   success: boolean;
+  /** Session ID from the Claude CLI stream (for resume) */
+  sessionId?: string;
+  /** Pending question if AskUserQuestion was denied */
+  pendingQuestion?: PendingQuestion;
 }
 
 /** Callback for streaming output */
@@ -68,6 +73,8 @@ export interface ClaudeRunOptions {
   onStream?: StreamCallback;
   /** Callback for AskUserQuestion Q&A pairs */
   onQuestionAnswer?: QuestionAnswerCallback;
+  /** Session ID to resume (for --resume flag) */
+  resumeSessionId?: string;
 }
 
 /**
@@ -243,6 +250,22 @@ interface TrackedQuestion {
   question: string;
 }
 
+/** Result from processing streaming output */
+interface StreamResult {
+  output: string;
+  sessionId?: string;
+  pendingQuestion?: PendingQuestion;
+}
+
+/** Permission denial from Claude CLI result event */
+interface PermissionDenial {
+  tool_name: string;
+  tool_use_id: string;
+  tool_input: {
+    questions?: QuestionDetail[];
+  };
+}
+
 /**
  * Process streaming JSON output from Claude CLI
  * Logs all events including tool usage with tool-specific formatting
@@ -252,10 +275,12 @@ async function processStreamingOutput(
   stepName: string,
   onStream?: StreamCallback,
   onQuestionAnswer?: QuestionAnswerCallback
-): Promise<string> {
+): Promise<StreamResult> {
   const decoder = new TextDecoder();
   let buffer = "";
   let fullOutput = "";
+  let sessionId: string | undefined;
+  let pendingQuestion: PendingQuestion | undefined;
 
   // Track tool names by their ID to match results with their tool
   const toolNames = new Map<string, string>();
@@ -277,6 +302,11 @@ async function processStreamingOutput(
 
       try {
         const event = JSON.parse(line);
+
+        // Capture session_id from any event
+        if (event.session_id && !sessionId) {
+          sessionId = event.session_id;
+        }
 
         // Handle different event types
         if (event.type === "assistant" && event.message?.content) {
@@ -347,6 +377,24 @@ async function processStreamingOutput(
           if (event.result) {
             fullOutput = event.result;
           }
+          // Update session_id from result if not already captured
+          if (event.session_id) {
+            sessionId = event.session_id;
+          }
+          // Check for AskUserQuestion permission denial
+          if (event.permission_denials?.length) {
+            const askDenial = (event.permission_denials as PermissionDenial[]).find(
+              (d) => d.tool_name === "AskUserQuestion"
+            );
+            if (askDenial && sessionId) {
+              pendingQuestion = {
+                claudeSessionId: sessionId,
+                toolUseId: askDenial.tool_use_id,
+                questions: askDenial.tool_input.questions || [],
+                capturedAt: new Date().toISOString(),
+              };
+            }
+          }
         }
       } catch {
         // Not JSON, might be raw output
@@ -360,8 +408,27 @@ async function processStreamingOutput(
   if (buffer.trim()) {
     try {
       const event = JSON.parse(buffer);
-      if (event.type === "result" && event.result) {
-        fullOutput = event.result;
+      if (event.type === "result") {
+        if (event.result) {
+          fullOutput = event.result;
+        }
+        if (event.session_id) {
+          sessionId = event.session_id;
+        }
+        // Check for AskUserQuestion permission denial in final buffer
+        if (event.permission_denials?.length) {
+          const askDenial = (event.permission_denials as PermissionDenial[]).find(
+            (d) => d.tool_name === "AskUserQuestion"
+          );
+          if (askDenial && sessionId) {
+            pendingQuestion = {
+              claudeSessionId: sessionId,
+              toolUseId: askDenial.tool_use_id,
+              questions: askDenial.tool_input.questions || [],
+              capturedAt: new Date().toISOString(),
+            };
+          }
+        }
       }
     } catch {
       fullOutput += buffer;
@@ -369,7 +436,7 @@ async function processStreamingOutput(
     }
   }
 
-  return fullOutput;
+  return { output: fullOutput, sessionId, pendingQuestion };
 }
 
 /**
@@ -414,12 +481,18 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     stream = false,
     onStream,
     onQuestionAnswer,
+    resumeSessionId,
   } = options;
 
   // Build command arguments
   const claudeCmd = getClaudeCommand();
   const outputFormat = stream ? "stream-json" : "json";
   const args: string[] = [claudeCmd, "-p", prompt, "--output-format", outputFormat];
+
+  // Add --resume flag if resuming a session
+  if (resumeSessionId) {
+    args.push("--resume", resumeSessionId);
+  }
 
   // stream-json requires --verbose when using -p
   if (stream) {
@@ -475,18 +548,22 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
   try {
     let stdout: string;
     let stderr: string;
+    let sessionId: string | undefined;
+    let pendingQuestion: PendingQuestion | undefined;
 
     if (stream && onStream) {
       // Stream stdout while capturing stderr
       const reader = proc.stdout.getReader();
-      const [streamedOutput, stderrOutput] = await Promise.race([
+      const [streamResult, stderrOutput] = await Promise.race([
         Promise.all([
           processStreamingOutput(reader, stepName, onStream, onQuestionAnswer),
           new Response(proc.stderr).text(),
         ]),
         timeoutPromise,
       ]);
-      stdout = streamedOutput;
+      stdout = streamResult.output;
+      sessionId = streamResult.sessionId;
+      pendingQuestion = streamResult.pendingQuestion;
       stderr = stderrOutput;
     } else {
       // Buffer all output
@@ -499,6 +576,11 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
       ]);
       stdout = stdoutOutput;
       stderr = stderrOutput;
+
+      // Parse session_id and permission_denials from non-streaming output
+      const parsed = parseStreamJsonForSession(stdout);
+      sessionId = parsed.sessionId;
+      pendingQuestion = parsed.pendingQuestion;
     }
 
     const exitCode = await proc.exited;
@@ -512,6 +594,8 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
       stdout,
       stderr,
       success: exitCode === 0,
+      sessionId,
+      pendingQuestion,
     };
   } catch (error) {
     if (timeoutId) {
@@ -524,6 +608,49 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
 
     throw new ClaudeExecutionError(-1, (error as Error).message);
   }
+}
+
+/**
+ * Parse stream-json output for session ID and pending questions (non-streaming case)
+ */
+function parseStreamJsonForSession(stdout: string): {
+  sessionId?: string;
+  pendingQuestion?: PendingQuestion;
+} {
+  let sessionId: string | undefined;
+  let pendingQuestion: PendingQuestion | undefined;
+
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event.session_id && !sessionId) {
+        sessionId = event.session_id;
+      }
+      if (event.type === "result") {
+        if (event.session_id) {
+          sessionId = event.session_id;
+        }
+        if (event.permission_denials?.length) {
+          const askDenial = (event.permission_denials as PermissionDenial[]).find(
+            (d) => d.tool_name === "AskUserQuestion"
+          );
+          if (askDenial && sessionId) {
+            pendingQuestion = {
+              claudeSessionId: sessionId,
+              toolUseId: askDenial.tool_use_id,
+              questions: askDenial.tool_input.questions || [],
+              capturedAt: new Date().toISOString(),
+            };
+          }
+        }
+      }
+    } catch {
+      // Ignore non-JSON lines
+    }
+  }
+
+  return { sessionId, pendingQuestion };
 }
 
 /**

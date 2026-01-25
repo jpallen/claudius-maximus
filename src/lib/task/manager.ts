@@ -27,6 +27,7 @@ import type {
   TaskThread,
   ThreadEntry,
   ThreadEntryType,
+  PendingQuestion,
 } from "./types";
 import type { Workflow } from "../workflow/types";
 
@@ -358,7 +359,7 @@ export async function startTask(taskId: string): Promise<Task> {
  */
 export async function pauseTask(
   taskId: string,
-  reason?: string
+  pendingQuestion?: PendingQuestion
 ): Promise<Task> {
   const task = await loadTask(taskId);
 
@@ -367,9 +368,20 @@ export async function pauseTask(
   }
 
   task.status = "paused";
+  task.pendingQuestion = pendingQuestion;
 
   await saveTask(task);
 
+  return task;
+}
+
+/**
+ * Clear the pending question from a task
+ */
+export async function clearPendingQuestion(taskId: string): Promise<Task> {
+  const task = await loadTask(taskId);
+  task.pendingQuestion = undefined;
+  await saveTask(task);
   return task;
 }
 

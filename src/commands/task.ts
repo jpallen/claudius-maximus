@@ -36,7 +36,7 @@ import {
   TaskNotFoundError,
   NotInGitRepoError,
 } from "../lib/errors";
-import type { TaskStatus } from "../lib/task/types";
+import type { TaskStatus, PendingQuestion } from "../lib/task/types";
 
 /** Format a date string for display */
 function formatDate(isoString: string): string {
@@ -72,6 +72,25 @@ function handleError(error: unknown): never {
     console.error(`Error: ${(error as Error).message}`);
   }
   process.exit(1);
+}
+
+/** Display a pending question from Claude */
+function displayPendingQuestion(question: PendingQuestion): void {
+  console.log("\n--- Claude is asking a question ---");
+  for (const q of question.questions) {
+    if (q.header) {
+      console.log(`\n[${q.header}]`);
+    }
+    console.log(`\nQ: ${q.question}`);
+    if (q.options?.length) {
+      console.log("Options:");
+      for (const opt of q.options) {
+        const desc = opt.description ? ` - ${opt.description}` : "";
+        console.log(`  - ${opt.label}${desc}`);
+      }
+    }
+  }
+  console.log("\n---");
 }
 
 /** Prompt user for input */
@@ -200,9 +219,12 @@ export function createTaskCommand(): Command {
           );
 
           if (result.status === "paused") {
-            console.log(
-              `\nTask is paused. Resume with: cm task resume ${newTask.id} --prompt "..."`
-            );
+            if (result.pendingQuestion) {
+              displayPendingQuestion(result.pendingQuestion);
+              console.log(`\nProvide answer with: cm task resume ${newTask.id} --answer "your answer"`);
+            } else {
+              console.log(`\nTask is paused. Resume with: cm task resume ${newTask.id} --prompt "..."`);
+            }
           } else if (result.status === "failed") {
             console.log(`\nWorkflow failed: ${result.error}`);
           } else if (result.status === "completed") {
@@ -325,6 +347,12 @@ export function createTaskCommand(): Command {
             console.log(`     Error: ${step.error}`);
           }
         }
+
+        // Show pending question if task is paused with one
+        if (t.status === "paused" && t.pendingQuestion) {
+          displayPendingQuestion(t.pendingQuestion);
+          console.log(`\nProvide answer with: cm task resume ${t.id} --answer "your answer"`);
+        }
       } catch (error) {
         handleError(error);
       }
@@ -372,9 +400,12 @@ export function createTaskCommand(): Command {
         const result = await executeWorkflow(t, workflow, config, execOptions);
 
         if (result.status === "paused") {
-          console.log(
-            `\nTask is paused. Resume with: cm task resume ${taskId} --prompt "..."`
-          );
+          if (result.pendingQuestion) {
+            displayPendingQuestion(result.pendingQuestion);
+            console.log(`\nProvide answer with: cm task resume ${taskId} --answer "your answer"`);
+          } else {
+            console.log(`\nTask is paused. Resume with: cm task resume ${taskId} --prompt "..."`);
+          }
         } else if (result.status === "failed") {
           console.log(`\nWorkflow failed: ${result.error}`);
         } else if (result.status === "completed") {
@@ -454,11 +485,12 @@ export function createTaskCommand(): Command {
       }
     });
 
-  // cm task resume <id> --prompt "..."
+  // cm task resume <id> --prompt "..." or --answer "..."
   task
     .command("resume <id>")
     .description("Resume a paused task with user input")
     .option("-p, --prompt <prompt>", "Prompt to provide for the paused step")
+    .option("-a, --answer <answer>", "Answer to a pending question from Claude")
     .option("-q, --quiet", "Suppress streaming output")
     .action(async (taskId: string, options) => {
       try {
@@ -471,13 +503,22 @@ export function createTaskCommand(): Command {
           return;
         }
 
-        if (!options.prompt) {
-          console.log(`Please provide a prompt with --prompt "..."`);
+        // Get input from either --answer or --prompt (answer takes precedence)
+        const input = options.answer || options.prompt;
+
+        if (!input) {
+          // Show pending question if there is one
+          if (t.pendingQuestion) {
+            displayPendingQuestion(t.pendingQuestion);
+            console.log(`\nProvide answer with: cm task resume ${taskId} --answer "your answer"`);
+          } else {
+            console.log(`Please provide a prompt with --prompt "..." or --answer "..."`);
+          }
           return;
         }
 
-        // Resume with prompt
-        t = await resumeTask(taskId, options.prompt);
+        // Resume with prompt/answer
+        t = await resumeTask(taskId, input);
 
         // Find git root and load config
         const { config } = await findAndLoadConfig(t.repoPath);
@@ -493,9 +534,12 @@ export function createTaskCommand(): Command {
         const result = await executeWorkflow(t, workflow, config, execOptions);
 
         if (result.status === "paused") {
-          console.log(
-            `\nTask is paused again. Resume with: cm task resume ${taskId} --prompt "..."`
-          );
+          if (result.pendingQuestion) {
+            displayPendingQuestion(result.pendingQuestion);
+            console.log(`\nProvide answer with: cm task resume ${taskId} --answer "your answer"`);
+          } else {
+            console.log(`\nTask is paused. Resume with: cm task resume ${taskId} --prompt "..."`);
+          }
         } else if (result.status === "failed") {
           console.log(`\nWorkflow failed: ${result.error}`);
         } else if (result.status === "completed") {

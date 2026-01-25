@@ -1794,6 +1794,279 @@ describe("branch management", () => {
   });
 });
 
+describe("AskUserQuestion handling", () => {
+  let ctx: TestContext;
+  let testRepoDir: string;
+  let mockDir: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    testRepoDir = await createTestRepo();
+    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-"));
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+    await rm(testRepoDir, { recursive: true, force: true });
+    await rm(mockDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Create a mock Claude that simulates AskUserQuestion permission denial
+   */
+  async function createQuestionMockClaude(
+    baseDir: string
+  ): Promise<{ scriptPath: string; logPath: string; stateFile: string }> {
+    const scriptPath = join(baseDir, "mock-claude-question");
+    const logPath = join(baseDir, "claude-calls.log");
+    const stateFile = join(baseDir, "state.txt");
+
+    // Create a shell script that simulates AskUserQuestion
+    const script = `#!/bin/bash
+# Mock Claude CLI that asks a question on first call, completes on resume
+
+echo "CALL: $@" >> "${logPath}"
+
+# Check for --resume flag
+HAS_RESUME=false
+SESSION_ID="test-session-123"
+PROMPT=""
+for arg in "$@"; do
+  if [[ "$arg" == "--resume" ]]; then
+    HAS_RESUME=true
+  fi
+  if [[ "$arg" == "test-session-123" ]]; then
+    HAS_RESUME=true
+  fi
+done
+
+# Parse prompt
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -p)
+      PROMPT="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+echo "PROMPT: $PROMPT" >> "${logPath}"
+echo "HAS_RESUME: $HAS_RESUME" >> "${logPath}"
+echo "---" >> "${logPath}"
+
+if [ -f "${stateFile}" ] || [ "$HAS_RESUME" = true ]; then
+  # Second call (resume) - complete the task
+  echo '{"type":"system","session_id":"test-session-123"}'
+  echo '{"type":"assistant","session_id":"test-session-123","message":{"content":[{"type":"text","text":"Thank you for your answer!"}]}}'
+  echo '{"type":"result","session_id":"test-session-123","result":"Thank you for your answer!"}'
+  exit 0
+else
+  # First call - ask a question (gets denied)
+  echo "asked" > "${stateFile}"
+  echo '{"type":"system","session_id":"test-session-123"}'
+  echo '{"type":"assistant","session_id":"test-session-123","message":{"content":[{"type":"tool_use","id":"toolu_123","name":"AskUserQuestion","input":{"questions":[{"question":"What is your favourite colour?","header":"Preference","options":[{"label":"Red","description":"A warm colour"},{"label":"Blue","description":"A cool colour"}]}]}}]}}'
+  echo '{"type":"user","message":{"content":[{"type":"tool_result","content":"Answer questions?","is_error":true,"tool_use_id":"toolu_123"}]}}'
+  echo '{"type":"result","session_id":"test-session-123","result":"","permission_denials":[{"tool_name":"AskUserQuestion","tool_use_id":"toolu_123","tool_input":{"questions":[{"question":"What is your favourite colour?","header":"Preference","options":[{"label":"Red","description":"A warm colour"},{"label":"Blue","description":"A cool colour"}]}]}}]}'
+  exit 0
+fi
+`;
+
+    await Bun.write(scriptPath, script);
+    await chmod(scriptPath, 0o755);
+    await Bun.write(logPath, "");
+
+    return { scriptPath, logPath, stateFile };
+  }
+
+  it("pauses task when Claude asks a question", async () => {
+    const { scriptPath } = await createQuestionMockClaude(mockDir);
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test question pause", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Claude is asking a question");
+    expect(result.stdout).toContain("What is your favourite colour?");
+    expect(result.stdout).toContain("Red");
+    expect(result.stdout).toContain("Blue");
+    expect(result.stdout).toContain("--answer");
+  });
+
+  it("stores pending question in task state", async () => {
+    const { scriptPath } = await createQuestionMockClaude(mockDir);
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test question storage", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(result.exitCode).toBe(0);
+
+    // Extract task ID
+    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Check task.json has pending question
+    const tasksDir = join(ctx.configDir, "tasks");
+    const taskData = JSON.parse(
+      await Bun.file(join(tasksDir, taskId, "task.json")).text()
+    );
+
+    expect(taskData.status).toBe("paused");
+    expect(taskData.pendingQuestion).toBeDefined();
+    expect(taskData.pendingQuestion.claudeSessionId).toBe("test-session-123");
+    expect(taskData.pendingQuestion.questions.length).toBe(1);
+    expect(taskData.pendingQuestion.questions[0].question).toBe("What is your favourite colour?");
+  });
+
+  it("shows pending question in task status", async () => {
+    const { scriptPath } = await createQuestionMockClaude(mockDir);
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test status question", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Check status shows question
+    const statusResult = await runCli(ctx, testRepoDir, ["task", "status", taskId]);
+
+    expect(statusResult.exitCode).toBe(0);
+    expect(statusResult.stdout).toContain("Status: paused");
+    expect(statusResult.stdout).toContain("What is your favourite colour?");
+    expect(statusResult.stdout).toContain("--answer");
+  });
+
+  it("shows pending question when resume called without answer", async () => {
+    const { scriptPath } = await createQuestionMockClaude(mockDir);
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test resume no answer", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Try to resume without an answer
+    const resumeResult = await runCli(ctx, testRepoDir, ["task", "resume", taskId]);
+
+    expect(resumeResult.exitCode).toBe(0);
+    expect(resumeResult.stdout).toContain("What is your favourite colour?");
+    expect(resumeResult.stdout).toContain("--answer");
+  });
+
+  it("resumes with --answer flag", async () => {
+    const { scriptPath, logPath } = await createQuestionMockClaude(mockDir);
+
+    // Create task (will pause on question)
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test resume with answer", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Resume with answer
+    const resumeResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "resume", taskId, "--answer", "Blue"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    expect(resumeResult.exitCode).toBe(0);
+    expect(resumeResult.stdout).toContain("Workflow completed");
+
+    // Check task is now completed
+    const tasksDir = join(ctx.configDir, "tasks");
+    const taskData = JSON.parse(
+      await Bun.file(join(tasksDir, taskId, "task.json")).text()
+    );
+    expect(taskData.status).toBe("completed");
+    expect(taskData.pendingQuestion).toBeUndefined();
+  });
+
+  it("clears pending question after successful resume", async () => {
+    const { scriptPath } = await createQuestionMockClaude(mockDir);
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test clear question", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Verify question is stored
+    const tasksDir = join(ctx.configDir, "tasks");
+    let taskData = JSON.parse(
+      await Bun.file(join(tasksDir, taskId, "task.json")).text()
+    );
+    expect(taskData.pendingQuestion).toBeDefined();
+
+    // Resume with answer
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "resume", taskId, "--answer", "Red"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    // Verify question is cleared
+    taskData = JSON.parse(
+      await Bun.file(join(tasksDir, taskId, "task.json")).text()
+    );
+    expect(taskData.pendingQuestion).toBeUndefined();
+  });
+
+  it("formats answer correctly when resuming", async () => {
+    const { scriptPath, logPath } = await createQuestionMockClaude(mockDir);
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test answer format", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+
+    // Resume with answer
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "resume", taskId, "--answer", "My favourite is Blue"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    // Check the log to verify answer format
+    const log = await readMockLog(logPath);
+    expect(log).toContain('The user answered: "My favourite is Blue"');
+  });
+});
+
 describe("task thread", () => {
   let ctx: TestContext;
   let testRepoDir: string;

@@ -67,6 +67,32 @@ export interface StepAttempt {
   completionMessage?: string;
 }
 
+/** Question option from AskUserQuestion tool */
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** A single question from AskUserQuestion tool */
+export interface QuestionDetail {
+  question: string;
+  header?: string;
+  options?: QuestionOption[];
+  multiSelect?: boolean;
+}
+
+/** Details of a pending question from AskUserQuestion tool */
+export interface PendingQuestion {
+  /** Session ID for resuming Claude */
+  claudeSessionId: string;
+  /** Tool use ID from the denied tool */
+  toolUseId: string;
+  /** The questions that were asked */
+  questions: QuestionDetail[];
+  /** Timestamp when question was captured */
+  capturedAt: string;
+}
+
 /** Complete task state */
 export interface Task {
   /** Unique task ID (e.g., "swift-falcon") */
@@ -97,6 +123,8 @@ export interface Task {
   error?: string;
   /** User-provided prompt for resume */
   resumePrompt?: string;
+  /** Pending question from AskUserQuestion (when paused for Q&A) */
+  pendingQuestion?: PendingQuestion;
 }
 
 /** Summary of a task for listing */
