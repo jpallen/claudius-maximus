@@ -38,7 +38,7 @@ When a task is created via `cm task create`, automatically generate a descriptiv
 ### Key Integration Points
 
 - **Primary change**: New branch name generation function in `src/lib/task/`
-- **Re-export module**: Add `src/lib/claude.ts` to expose Claude-related functions cleanly to task layer
+- **Import from workflow**: Import `runClaude` and `parseClaudeOutput` directly from `workflow/claude-runner` (no re-export module needed)
 - **Task ID validation**: Update `isValidTaskId()` for new format
 - **Manager**: Modify `createTask()` to use Claude-generated names
 - **Testing**: Mock Claude for deterministic test results using shared helper
@@ -81,7 +81,6 @@ When a task is created via `cm task create`, automatically generate a descriptiv
 
 1. **New modules**:
    - `src/lib/task/branch-name-generator.ts`: Contains Claude-based name generation logic, isolated for testability
-   - `src/lib/claude.ts`: Re-export module that exposes `runClaude` and `parseClaudeOutput` for use by task layer (cleaner dependency direction than importing from `workflow/`)
 
 2. **Modifications**:
    - `src/lib/task/manager.ts`: Update `createTask()` to use new generator
@@ -92,32 +91,18 @@ When a task is created via `cm task create`, automatically generate a descriptiv
    - Worktree creation (uses whatever ID is passed)
    - Task types (ID is just a string)
    - Commands (transparent change)
+   - No re-export module needed - import directly from `workflow/claude-runner`
 
 ### Detailed Steps
 
-#### Step 1: Create `src/lib/claude.ts` (re-export module)
-
-```typescript
-/**
- * Re-export Claude-related functions for use by other modules
- *
- * This provides a cleaner dependency direction - instead of task/
- * importing from workflow/, both can import from the top-level
- * claude.ts module.
- */
-
-export { runClaude, parseClaudeOutput } from "./workflow/claude-runner";
-export type { ClaudeResult, ClaudeRunOptions } from "./workflow/claude-runner";
-```
-
-#### Step 2: Create `src/lib/task/branch-name-generator.ts`
+#### Step 1: Create `src/lib/task/branch-name-generator.ts`
 
 ```typescript
 /**
  * Generate semantic branch names from task descriptions using Claude
  */
 
-import { runClaude, parseClaudeOutput } from "../claude";
+import { runClaude, parseClaudeOutput } from "../workflow/claude-runner";
 
 /** Prompt for Claude to generate branch names */
 const BRANCH_NAME_PROMPT = `Generate a short, descriptive git branch name for this task.
@@ -137,6 +122,13 @@ Return ONLY the branch name, nothing else. No explanation, no quotes, just the b
 
 /**
  * Generate a branch name from a task description using Claude
+ *
+ * @param description - The task description to generate a branch name from
+ * @param cwd - Working directory for Claude CLI invocation. This is typically the
+ *              repository root path. Required because Claude CLI needs to run in
+ *              a valid directory context, even though this function doesn't use
+ *              any files from the directory.
+ * @returns Generated branch name, or null if generation fails
  */
 export async function generateBranchName(
   description: string,
@@ -250,7 +242,7 @@ export function ensureUniqueBranchName(
 }
 ```
 
-#### Step 3: Update `src/lib/task/id-generator.ts`
+#### Step 2: Update `src/lib/task/id-generator.ts`
 
 Update the validation function to accept both formats:
 
@@ -272,7 +264,7 @@ export function isValidTaskId(id: string): boolean {
 }
 ```
 
-#### Step 4: Update `src/lib/task/manager.ts`
+#### Step 3: Update `src/lib/task/manager.ts`
 
 Modify `createTask()` to use Claude-generated names with fallback:
 
@@ -331,7 +323,7 @@ export async function createTask(
 }
 ```
 
-#### Step 5: Export new functions from branch-name-generator
+#### Step 4: Export new functions from branch-name-generator
 
 Update the module exports to ensure testability:
 
@@ -340,14 +332,17 @@ Update the module exports to ensure testability:
 export { cleanBranchName, isValidBranchName };
 ```
 
-#### Step 6: Add shared test helper to `tests/helpers.ts`
+#### Step 5: Add shared test helper to `tests/helpers.ts`
 
-Add a lightweight mock Claude helper for simple output scenarios:
+Add a lightweight mock Claude helper for simple output scenarios. Uses a file-based approach to avoid shell escaping issues:
 
 ```typescript
 /**
  * Create a simple mock Claude script that returns a fixed output
  * Lighter weight than createMockClaude() for branch name generation tests
+ *
+ * Uses a file-based output approach to avoid shell escaping issues with
+ * complex strings containing quotes, newlines, or special characters.
  */
 export async function createSimpleMockClaude(
   baseDir: string,
@@ -356,27 +351,38 @@ export async function createSimpleMockClaude(
     output: string;
     /** Exit code to return (default: 0) */
     exitCode?: number;
+    /** Track invocations by touching a flag file (default: false) */
+    trackInvocations?: boolean;
   }
-): Promise<{ scriptPath: string }> {
+): Promise<{ scriptPath: string; invocationFlagPath?: string }> {
   const scriptPath = join(baseDir, "simple-mock-claude");
+  const outputPath = join(baseDir, "mock-claude-output.json");
+  const invocationFlagPath = join(baseDir, "claude-was-called");
 
-  const { output, exitCode = 0 } = options;
+  const { output, exitCode = 0, trackInvocations = false } = options;
 
-  // Escape the output for shell (handle quotes and newlines)
-  const escapedOutput = output.replace(/'/g, "'\"'\"'");
+  // Write the JSON output to a file (avoids shell escaping issues)
+  const jsonOutput = JSON.stringify({ result: output });
+  await Bun.write(outputPath, jsonOutput);
 
+  // Script reads from file instead of echoing escaped string
+  // Optionally touches a flag file to track invocations
   const script = `#!/bin/bash
 # Simple mock Claude CLI for testing
-# Returns fixed JSON output without task completion tracking
+# Reads output from a file to avoid shell escaping issues
+${trackInvocations ? `\ntouch "${invocationFlagPath}"` : ""}
 
-echo '{"result": "'$"${escapedOutput}"'"}'
+cat "${outputPath}"
 exit ${exitCode}
 `;
 
   await Bun.write(scriptPath, script);
   await chmod(scriptPath, 0o755);
 
-  return { scriptPath };
+  return {
+    scriptPath,
+    ...(trackInvocations ? { invocationFlagPath } : {}),
+  };
 }
 ```
 
@@ -439,31 +445,66 @@ Use the shared `createSimpleMockClaude()` helper from `tests/helpers.ts` for the
    });
    // Set CM_CLAUDE_COMMAND env var and run task create
    // Verify task is created with Claude-generated name
-   // Verify branch is `cm-task/implement-user-authentication`
+   // Verify git branch exists as `cm-task/implement-user-authentication`
+   const branches = await runGit(["branch", "-l"], { cwd: repoPath });
+   expect(branches.stdout).toContain("cm-task/implement-user-authentication");
    ```
 
-2. **Fallback to random ID when Claude fails**:
+2. **Fallback to random ID when Claude fails (non-zero exit)**:
    ```typescript
    const { scriptPath } = await createSimpleMockClaude(baseDir, {
      output: "",
      exitCode: 1
    });
    // Verify fallback to random adjective-noun ID pattern
+   // Verify task ID matches /^[a-z]+-[a-z]+$/
    ```
 
-3. **Fallback to random ID for empty description**:
+3. **Fallback to random ID for empty description (no Claude call)**:
    ```typescript
+   // Create mock with invocation tracking
+   const { scriptPath, invocationFlagPath } = await createSimpleMockClaude(baseDir, {
+     output: "should-not-be-used",
+     trackInvocations: true
+   });
    // Create task with empty description
-   // Verify fallback to random adjective-noun ID pattern (no Claude call)
+   // Verify fallback to random adjective-noun ID pattern
+   // Verify Claude was NOT called - invocationFlagPath should not exist
+   expect(await Bun.file(invocationFlagPath!).exists()).toBe(false);
    ```
 
-4. **Duplicate name handling**:
+4. **Fallback to random ID for unusable output**:
+   ```typescript
+   // Mock returns output that's invalid after cleaning
+   const { scriptPath } = await createSimpleMockClaude(baseDir, {
+     output: "!!!"  // Cleans to empty string
+   });
+   // Verify fallback to random adjective-noun ID pattern
+   ```
+
+5. **Fallback for too-short generated names**:
+   ```typescript
+   const { scriptPath } = await createSimpleMockClaude(baseDir, {
+     output: "a"  // Single char is too short
+   });
+   // Verify fallback to random adjective-noun ID pattern
+   ```
+
+6. **Fallback for too-long generated names**:
+   ```typescript
+   const { scriptPath } = await createSimpleMockClaude(baseDir, {
+     output: "a".repeat(100)  // >60 chars is too long
+   });
+   // Verify fallback to random adjective-noun ID pattern
+   ```
+
+7. **Duplicate name handling**:
    ```typescript
    // Create two tasks with same description that generates same name
    // Verify first task gets base name, second task gets `-2` suffix
    ```
 
-5. **Messy Claude output is cleaned**:
+8. **Messy Claude output is cleaned**:
    ```typescript
    const { scriptPath } = await createSimpleMockClaude(baseDir, {
      output: '"implement-auth"\n\nThis is a good branch name.'
@@ -471,27 +512,46 @@ Use the shared `createSimpleMockClaude()` helper from `tests/helpers.ts` for the
    // Verify cleaning extracts correct name: implement-auth
    ```
 
+9. **Timeout handling**:
+   ```typescript
+   // Create a mock that sleeps longer than timeout
+   const scriptPath = join(baseDir, "slow-mock-claude");
+   await Bun.write(scriptPath, `#!/bin/bash\nsleep 20\necho '{"result":"should-not-reach"}'`);
+   // With a 1s timeout configured, verify fallback to random ID
+   ```
+
 ### Unit Tests (`tests/branch-name-generator.test.ts`)
 
 Test the pure functions without Claude invocation:
 
 1. **`cleanBranchName()` tests**:
-   - Removes quotes: `"implement-auth"` → `implement-auth`
+   - Removes double quotes: `"implement-auth"` → `implement-auth`
+   - Removes single quotes: `'implement-auth'` → `implement-auth`
+   - Removes backticks: `` `implement-auth` `` → `implement-auth`
    - Lowercases: `Implement-Auth` → `implement-auth`
    - Replaces spaces: `implement auth` → `implement-auth`
    - Removes invalid chars: `implement@auth!` → `implementauth`
    - Handles multiple hyphens: `implement--auth` → `implement-auth`
+   - Removes leading hyphens: `-implement-auth` → `implement-auth`
+   - Removes trailing hyphens: `implement-auth-` → `implement-auth`
 
 2. **`isValidBranchName()` tests**:
    - Valid: `implement-auth`, `fix-bug`, `add-user-settings-page`
-   - Invalid: empty string, too long (>60 chars), special chars
-   - Invalid: leading numbers, leading hyphens
+   - Valid: single word `auth` (minimum 2 chars)
+   - Invalid: empty string
+   - Invalid: too short (1 char)
+   - Invalid: too long (>60 chars)
+   - Invalid: special characters
+   - Invalid: leading numbers `1-fix-bug`
+   - Invalid: leading hyphens `-fix-bug`
+   - Invalid: contains uppercase `Fix-Bug`
 
 3. **`ensureUniqueBranchName()` tests**:
    - Returns name unchanged if not in set
    - Appends `-2` for first conflict
    - Appends `-3` for second conflict
-   - Handles edge cases
+   - Handles name that already ends with suffix (`foo-2` → `foo-2-2` if `foo-2` exists)
+   - Returns correct suffix when multiple conflicts exist (e.g., `foo`, `foo-2`, `foo-3` → `foo-4`)
 
 ### Edge Cases to Cover
 
@@ -502,6 +562,8 @@ Test the pure functions without Claude invocation:
 - Whitespace-only description (should fallback to random - explicit check added)
 - Network/API failures (should fallback gracefully)
 - Generated name conflicts with existing task
+- Claude output that's only quotes/special chars (invalid after cleaning)
+- Generated name exactly at length boundaries (2 chars, 60 chars)
 
 ## Migration/Rollout
 
@@ -542,11 +604,28 @@ All major questions have been resolved. The following are documented for future 
 
 ## Revision Notes
 
-This plan was updated to address review feedback:
+### Revision 3 (addressing second review)
+
+1. ✅ **Removed unnecessary re-export module**: Import directly from `workflow/claude-runner` instead of creating `src/lib/claude.ts`
+2. ✅ **Fixed createSimpleMockClaude() shell escaping**: Changed to file-based output approach - write JSON to a file, script uses `cat` to read it
+3. ✅ **Added missing E2E test cases**:
+   - Unusable output (cleans to empty)
+   - Too-short names (< 2 chars)
+   - Too-long names (> 60 chars)
+   - Timeout behavior
+   - No-Claude-call verification for empty description
+   - Git branch verification in success case
+4. ✅ **Expanded unit tests**:
+   - `cleanBranchName()`: backticks, leading/trailing hyphens
+   - `isValidBranchName()`: single-word names, exact boundary lengths
+   - `ensureUniqueBranchName()`: pre-existing suffixes, multiple conflicts
+5. ✅ **Added cwd parameter documentation**: Added detailed JSDoc explaining why cwd is needed
+
+### Revision 2 (addressing first review)
 
 1. ✅ **Shared test helper**: Added `createSimpleMockClaude()` to `tests/helpers.ts` for lightweight mocking
 2. ✅ **E2E-first testing**: Restructured Testing Strategy to put integration tests before unit tests
-3. ✅ **Re-export module**: Added `src/lib/claude.ts` for cleaner dependency direction (task → claude → workflow)
+3. ✅ **Re-export module**: Originally added `src/lib/claude.ts` (removed in revision 3)
 4. ✅ **Empty description handling**: Added explicit check for empty/whitespace-only descriptions at start of `generateBranchName()`
 
 ## Appendix
