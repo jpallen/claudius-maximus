@@ -20,7 +20,6 @@ import { formatThreadForDisplay } from "../lib/task/thread-formatter";
 import { findAndLoadConfig, getWorkflow } from "../lib/workflow/loader";
 import {
   executeWorkflow,
-  executeNextStep,
   type ExecutionOptions,
 } from "../lib/workflow/executor";
 import {
@@ -381,73 +380,6 @@ export function createTaskCommand(): Command {
           // Reload task to get baseBranch
           const completedTask = await getTask(taskId);
           await handleMergePrompt(taskId, completedTask.repoPath, completedTask.baseBranch);
-        }
-      } catch (error) {
-        handleError(error);
-      }
-    });
-
-  // cm task step <id>
-  task
-    .command("step <id>")
-    .description("Run just the next step of a task")
-    .option("-q, --quiet", "Suppress streaming output")
-    .action(async (taskId: string, options) => {
-      try {
-        // Load task
-        let t = await getTask(taskId);
-
-        if (t.status === "completed") {
-          console.log(`Task ${taskId} is already completed.`);
-          return;
-        }
-
-        if (t.status === "cancelled") {
-          console.log(`Task ${taskId} was cancelled.`);
-          return;
-        }
-
-        if (t.status === "failed") {
-          console.log(`Task ${taskId} has failed. Delete and recreate it.`);
-          return;
-        }
-
-        // Find git root and load config
-        const { config } = await findAndLoadConfig(t.repoPath);
-        const workflow = getWorkflow(config, t.workflow);
-
-        if (t.currentStep >= workflow.steps.length) {
-          console.log(`Task ${taskId} has no more steps to run.`);
-          return;
-        }
-
-        // Start or resume the task
-        if (t.status === "pending" || t.status === "paused") {
-          t = await startTask(taskId);
-        }
-
-        const execOptions: ExecutionOptions = {
-          stream: !options.quiet,
-          verbose: true,
-        };
-
-        const result = await executeNextStep(t, workflow, config, execOptions);
-
-        if (result.shouldPause) {
-          console.log(`\nStep requires user input.`);
-          console.log(
-            `Resume with: cm task resume ${taskId} --prompt "..."`
-          );
-        } else if (result.success) {
-          // Check if there are more steps
-          const updatedTask = await getTask(taskId);
-          if (updatedTask.currentStep >= workflow.steps.length) {
-            console.log(`\nTask completed!`);
-          } else {
-            console.log(
-              `\nNext step: ${workflow.steps[updatedTask.currentStep].name}`
-            );
-          }
         }
       } catch (error) {
         handleError(error);

@@ -1,14 +1,16 @@
 /**
- * Workflow step executor
+ * Orchestrator-based workflow executor
+ *
+ * Claude acts as an orchestrator, deciding which step to run next based on
+ * the workflow prompt, available steps, and thread history.
  */
 
-import type { Task, StepAttempt } from "../task/types";
+import type { Task, StepAttempt, OrchestratorDecision } from "../task/types";
 import type { CmConfig, Workflow, WorkflowStep } from "./types";
 import { runClaude, parseClaudeOutput, type ClaudeResult } from "./claude-runner";
 import {
   updateTask,
   updateStepStatus,
-  advanceStep,
   completeTask,
   failTask,
   pauseTask,
@@ -18,17 +20,18 @@ import {
   loadAttempt,
   loadThread,
   appendThreadEntry,
+  saveOrchestratorDecision,
+  loadOrchestratorDecision,
+  clearOrchestratorDecision,
 } from "../task/manager";
 import { formatThreadForContext } from "../task/thread-formatter";
-import { setupStopHook } from "../task/hooks";
+import { setupStopHook, setupOrchestratorStopHook } from "../task/hooks";
 import { StepTimeoutError, ClaudeExecutionError } from "../errors";
 
 /** Result of executing a single step */
 export interface StepResult {
   /** Whether the step succeeded */
   success: boolean;
-  /** Whether the task should pause (waiting for user input) */
-  shouldPause: boolean;
   /** Output from Claude CLI */
   output?: string;
   /** Error message if failed */
@@ -43,7 +46,7 @@ export interface WorkflowResult {
   status: "completed" | "failed" | "paused" | "cancelled";
   /** Error message if failed */
   error?: string;
-  /** Number of steps completed */
+  /** Number of steps executed */
   stepsCompleted: number;
   /** Total duration in milliseconds */
   durationMs?: number;
@@ -81,9 +84,106 @@ function formatDuration(ms: number): string {
 }
 
 /**
- * Build completion instructions for the system prompt
+ * Build the orchestrator system prompt
  */
-function buildCompletionInstructions(stepName: string): string {
+function buildOrchestratorSystemPrompt(workflow: Workflow): string {
+  const stepsDescription = workflow.steps
+    .map((s) => {
+      const parts = [`- **${s.name}**`];
+      if (s.prompt) parts.push(`: ${s.prompt}`);
+      if (s.agent) parts.push(` (agent: ${s.agent})`);
+      return parts.join("");
+    })
+    .join("\n");
+
+  return `
+## Orchestrator Role
+
+You are the orchestrator for this workflow. Your job is to:
+1. Understand the user's goal from the workflow instructions
+2. Decide which step to execute next (or request human input)
+3. Review step results and decide the next action
+4. Continue until the workflow is complete or cannot proceed
+
+## Available Steps
+
+${stepsDescription}
+
+## Decision Commands (REQUIRED)
+
+Before finishing, you MUST run exactly ONE of these commands:
+
+**Run a step:**
+\`\`\`bash
+cm system orchestrator-decision --step "<step-name>" --reason "why this step"
+\`\`\`
+
+**Request human input:**
+\`\`\`bash
+cm system orchestrator-decision --need-input --question "your question"
+\`\`\`
+
+**Complete the workflow:**
+\`\`\`bash
+cm system orchestrator-decision --complete --summary "what was accomplished"
+\`\`\`
+
+**Fail the workflow:**
+\`\`\`bash
+cm system orchestrator-decision --fail --reason "why it cannot proceed"
+\`\`\`
+
+## Guidelines
+
+- Review the thread history to understand what has been done
+- Choose steps based on the current state and goal
+- You can run steps in any order, skip steps, or run them multiple times
+- Request input when you need clarification or approval
+- Complete the workflow when the goal is achieved
+`.trim();
+}
+
+/**
+ * Build the orchestrator prompt including thread history
+ */
+async function buildOrchestratorPrompt(
+  task: Task,
+  workflow: Workflow
+): Promise<string> {
+  const thread = await loadThread(task.id);
+  const threadContext = formatThreadForContext(thread);
+
+  const parts: string[] = [];
+
+  // Thread history (includes task description)
+  if (threadContext) {
+    parts.push("## Thread History\n");
+    parts.push(threadContext);
+    parts.push("\n");
+  }
+
+  // Orchestrator instructions from workflow
+  parts.push("## Orchestrator Instructions\n");
+  parts.push(workflow.prompt);
+  parts.push("\n");
+
+  // If resuming with user input, include it
+  if (task.resumePrompt) {
+    parts.push("## User Response\n");
+    parts.push(task.resumePrompt);
+    parts.push("\n");
+  }
+
+  parts.push("---\n");
+  parts.push("Based on the above, decide what to do next.");
+
+  return parts.join("\n");
+}
+
+/**
+ * Build completion instructions for step execution
+ */
+function buildStepCompletionInstructions(stepName: string): string {
   return `
 ## Task Completion (REQUIRED)
 
@@ -97,84 +197,50 @@ You will be blocked from exiting until you run one of these commands.
 }
 
 /**
- * Build the prompt for a step
- */
-function buildStepPrompt(
-  step: WorkflowStep,
-  task: Task,
-  isResuming: boolean
-): string | null {
-  // If we're resuming and there's a resume prompt, use it
-  if (isResuming && task.resumePrompt) {
-    return task.resumePrompt;
-  }
-
-  // Use step prompt if defined
-  if (step.prompt) {
-    // Substitute task description into prompt
-    return step.prompt.replace(/\{description\}/g, task.description);
-  }
-
-  // If step has a model or agent but no prompt, use the task description
-  if (step.model || step.agent) {
-    return task.description;
-  }
-
-  // No agent and no prompt - need user input
-  return null;
-}
-
-/**
- * Execute a single workflow step
+ * Execute a single step (called by orchestrator)
  */
 async function executeStep(
   task: Task,
-  step: WorkflowStep,
-  stepIndex: number,
-  totalSteps: number,
+  workflow: Workflow,
+  stepName: string,
   config: CmConfig,
-  options: ExecutionOptions,
-  isResuming: boolean = false
+  options: ExecutionOptions
 ): Promise<StepResult> {
   const { stream, verbose, log, streamOutput } = options;
   const startTime = Date.now();
 
-  // Determine attempt number early so we can use it for thread entries
-  const currentStep = task.steps[stepIndex];
-  const attempt = (currentStep.currentAttempt || 0) + 1;
-
-  // Capture resume prompt entry if resuming with a user prompt
-  if (isResuming && task.resumePrompt) {
-    await appendThreadEntry(task.id, {
-      type: "resume_prompt",
-      stepName: step.name,
-      attemptNumber: attempt,
-      content: task.resumePrompt,
-    });
-  }
-
-  // Build the base prompt
-  const basePrompt = buildStepPrompt(step, task, isResuming);
-
-  // If no prompt can be built, pause for user input
-  if (!basePrompt) {
+  // Find the step
+  const step = workflow.steps.find((s) => s.name === stepName);
+  if (!step) {
     return {
-      success: true,
-      shouldPause: true,
+      success: false,
+      error: `Step "${stepName}" not found in workflow`,
     };
   }
 
-  // Load thread and build prompt with context
+  // Find step index for status updates
+  const stepIndex = workflow.steps.findIndex((s) => s.name === stepName);
+
+  // Determine attempt number
+  const currentStep = task.steps[stepIndex];
+  const attempt = (currentStep?.currentAttempt || 0) + 1;
+
+  // Build the step prompt
+  const stepPrompt = step.prompt || task.description;
+
+  // Load thread for context
   const thread = await loadThread(task.id);
   const threadContext = formatThreadForContext(thread);
-  const prompt = threadContext ? `${threadContext}\n\n${basePrompt}` : basePrompt;
+  const prompt = threadContext
+    ? `${threadContext}\n\n${stepPrompt}`
+    : stepPrompt;
 
-  // Capture the step prompt entry (using basePrompt to avoid duplicating context)
+  // Capture the step prompt entry
   await appendThreadEntry(task.id, {
     type: "step_prompt",
     stepName: step.name,
     attemptNumber: attempt,
-    content: basePrompt,
+    content: stepPrompt,
     metadata: { model: step.model },
   });
 
@@ -182,9 +248,8 @@ async function executeStep(
   if (verbose && log) {
     const modelInfo = step.model ? ` [${step.model}]` : "";
     const agentInfo = step.agent ? ` (agent: ${step.agent})` : "";
-    const attemptInfo = attempt > 1 ? ` (attempt ${attempt})` : "";
     log(`\n${"─".repeat(60)}`);
-    log(`Step ${stepIndex + 1}/${totalSteps}: ${step.name}${modelInfo}${agentInfo}${attemptInfo}`);
+    log(`Executing step: ${step.name}${modelInfo}${agentInfo}`);
     log(`${"─".repeat(60)}\n`);
   }
 
@@ -203,29 +268,33 @@ async function executeStep(
   };
   await saveAttempt(task.id, step.name, attemptData);
 
-  // Setup Stop hook in the worktree
+  // Setup Stop hook for step completion
   await setupStopHook(task.worktreePath);
 
   const timeout = step.timeout || config.defaults?.timeout;
 
   // Create callback for Q&A capture
-  const onQuestionAnswer = async (question: string, answer: string, stepName: string) => {
+  const onQuestionAnswer = async (
+    question: string,
+    answer: string,
+    qStepName: string
+  ) => {
     await appendThreadEntry(task.id, {
       type: "user_question",
-      stepName,
+      stepName: qStepName,
       attemptNumber: attempt,
       content: question,
     });
     await appendThreadEntry(task.id, {
       type: "user_answer",
-      stepName,
+      stepName: qStepName,
       attemptNumber: attempt,
       content: answer,
     });
   };
 
   try {
-    // Run Claude CLI with task context for completion tracking
+    // Run Claude CLI for the step
     const result: ClaudeResult = await runClaude({
       prompt,
       model: step.model,
@@ -233,7 +302,7 @@ async function executeStep(
       cwd: task.worktreePath,
       timeout,
       stepName: step.name,
-      appendSystemPrompt: buildCompletionInstructions(step.name),
+      appendSystemPrompt: buildStepCompletionInstructions(step.name),
       taskId: task.id,
       taskStepName: step.name,
       taskStepAttempt: attempt,
@@ -263,26 +332,11 @@ async function executeStep(
     try {
       updatedAttempt = await loadAttempt(task.id, step.name, attempt);
     } catch {
-      // If attempt file not found, create a basic one
       updatedAttempt = attemptData;
-    }
-
-    // Log step completion
-    if (verbose && log) {
-      log(`\n${"─".repeat(60)}`);
     }
 
     // Check if step was explicitly marked
     if (updatedAttempt.explicitlyFailed) {
-      // Capture failed response in thread
-      await appendThreadEntry(task.id, {
-        type: "claude_response",
-        stepName: step.name,
-        attemptNumber: attempt,
-        content: updatedAttempt.error || "Step failed",
-        metadata: { success: false, explicitlyFailed: true },
-      });
-
       await updateStepStatus(task.id, stepIndex, {
         status: "failed",
         completedAt: new Date().toISOString(),
@@ -290,28 +344,20 @@ async function executeStep(
       });
 
       if (verbose && log) {
+        log(`\n${"─".repeat(60)}`);
         log(`Step failed: ${updatedAttempt.error} (${formatDuration(durationMs)})`);
       }
 
       return {
         success: false,
-        shouldPause: false,
         error: updatedAttempt.error,
         durationMs,
       };
     }
 
     if (updatedAttempt.explicitlyCompleted) {
-      const responseContent = updatedAttempt.completionMessage || parsed.result || "";
-
-      // Capture successful response in thread
-      await appendThreadEntry(task.id, {
-        type: "claude_response",
-        stepName: step.name,
-        attemptNumber: attempt,
-        content: responseContent,
-        metadata: { success: true, explicitlyCompleted: true },
-      });
+      const responseContent =
+        updatedAttempt.completionMessage || parsed.result || "";
 
       await updateStepStatus(task.id, stepIndex, {
         status: "completed",
@@ -320,31 +366,21 @@ async function executeStep(
       });
 
       if (verbose && log) {
+        log(`\n${"─".repeat(60)}`);
         log(`Step completed (${formatDuration(durationMs)})`);
       }
 
       return {
         success: true,
-        shouldPause: false,
         output: responseContent,
         durationMs,
       };
     }
 
-    // Fallback to exit code based success/failure (for backwards compatibility)
+    // Fallback to exit code
     if (result.success) {
       const responseContent = parsed.result || "";
 
-      // Capture successful response in thread
-      await appendThreadEntry(task.id, {
-        type: "claude_response",
-        stepName: step.name,
-        attemptNumber: attempt,
-        content: responseContent,
-        metadata: { success: true },
-      });
-
-      // Mark step as completed
       await updateStepStatus(task.id, stepIndex, {
         status: "completed",
         completedAt: new Date().toISOString(),
@@ -352,27 +388,17 @@ async function executeStep(
       });
 
       if (verbose && log) {
+        log(`\n${"─".repeat(60)}`);
         log(`Step completed (${formatDuration(durationMs)})`);
       }
 
       return {
         success: true,
-        shouldPause: false,
         output: responseContent,
         durationMs,
       };
     } else {
-      // Mark step as failed
       const errorMsg = result.stderr || `Exit code ${result.exitCode}`;
-
-      // Capture failed response in thread
-      await appendThreadEntry(task.id, {
-        type: "claude_response",
-        stepName: step.name,
-        attemptNumber: attempt,
-        content: errorMsg,
-        metadata: { success: false, exitCode: result.exitCode },
-      });
 
       await updateStepStatus(task.id, stepIndex, {
         status: "failed",
@@ -381,12 +407,12 @@ async function executeStep(
       });
 
       if (verbose && log) {
+        log(`\n${"─".repeat(60)}`);
         log(`Step failed: ${errorMsg} (${formatDuration(durationMs)})`);
       }
 
       return {
         success: false,
-        shouldPause: false,
         error: errorMsg,
         durationMs,
       };
@@ -400,21 +426,10 @@ async function executeStep(
           ? error.stderr
           : (error as Error).message;
 
-    // Mark step as failed
     await updateStepStatus(task.id, stepIndex, {
       status: "failed",
       completedAt: new Date().toISOString(),
       error: errorMsg,
-    });
-
-    // Save step log
-    await saveStepLog(task.id, stepIndex, step.name, {
-      prompt,
-      model: step.model,
-      agent: step.agent,
-      error: errorMsg,
-      durationMs,
-      timestamp: new Date().toISOString(),
     });
 
     if (verbose && log) {
@@ -424,7 +439,6 @@ async function executeStep(
 
     return {
       success: false,
-      shouldPause: false,
       error: errorMsg,
       durationMs,
     };
@@ -432,56 +446,7 @@ async function executeStep(
 }
 
 /**
- * Execute a single step of the workflow (for step-by-step mode)
- */
-export async function executeNextStep(
-  task: Task,
-  workflow: Workflow,
-  config: CmConfig,
-  options: ExecutionOptions = {}
-): Promise<StepResult> {
-  const opts = { ...defaultExecutionOptions, ...options };
-  const stepIndex = task.currentStep;
-
-  if (stepIndex >= workflow.steps.length) {
-    // All steps completed
-    return {
-      success: true,
-      shouldPause: false,
-    };
-  }
-
-  const step = workflow.steps[stepIndex];
-  // Check if we're resuming - indicated by having a resumePrompt
-  const isResuming = !!task.resumePrompt;
-
-  // Execute the step (will use resumePrompt if available)
-  const result = await executeStep(
-    task,
-    step,
-    stepIndex,
-    workflow.steps.length,
-    config,
-    opts,
-    isResuming
-  );
-
-  // Clear resume prompt after using it
-  if (task.resumePrompt) {
-    task.resumePrompt = undefined;
-    await updateTask(task);
-  }
-
-  if (result.success && !result.shouldPause) {
-    // Advance to next step
-    await advanceStep(task.id);
-  }
-
-  return result;
-}
-
-/**
- * Execute all remaining steps in the workflow
+ * Execute the workflow using Claude as an orchestrator
  */
 export async function executeWorkflow(
   task: Task,
@@ -491,65 +456,177 @@ export async function executeWorkflow(
 ): Promise<WorkflowResult> {
   const opts = { ...defaultExecutionOptions, ...options };
   const startTime = Date.now();
-  let stepsCompleted = 0;
-  let totalDuration = 0;
+  let stepsExecuted = 0;
+  let iteration = 0;
 
   if (opts.verbose && opts.log) {
     opts.log(`\nExecuting workflow: ${task.workflow}`);
     opts.log(`Task: ${task.id}`);
     opts.log(`Description: ${task.description}`);
-    opts.log(`Steps: ${workflow.steps.length}`);
+    opts.log(`Available steps: ${workflow.steps.map((s) => s.name).join(", ")}`);
   }
 
-  while (task.currentStep < workflow.steps.length) {
-    const result = await executeNextStep(task, workflow, config, opts);
+  // Main orchestrator loop
+  while (true) {
+    iteration++;
 
-    if (result.durationMs) {
-      totalDuration += result.durationMs;
+    if (opts.verbose && opts.log) {
+      opts.log(`\n${"═".repeat(60)}`);
+      opts.log(`Orchestrator iteration ${iteration}`);
+      opts.log(`${"═".repeat(60)}\n`);
     }
 
-    if (result.shouldPause) {
-      // Pause the task
-      await pauseTask(task.id);
-      return {
-        status: "paused",
-        stepsCompleted,
-        durationMs: Date.now() - startTime,
-      };
-    }
+    // 1. Build orchestrator prompt
+    const prompt = await buildOrchestratorPrompt(task, workflow);
 
-    if (!result.success) {
-      // Step failed - fail the task
-      await failTask(task.id, result.error || "Step failed");
+    // 2. Setup orchestrator stop hook and clear previous decision
+    await setupOrchestratorStopHook(task.worktreePath);
+    await clearOrchestratorDecision(task.id);
+
+    // 3. Run Claude as orchestrator
+    try {
+      await runClaude({
+        prompt,
+        model: workflow.model || "opus",
+        cwd: task.worktreePath,
+        timeout: config.defaults?.timeout,
+        appendSystemPrompt: buildOrchestratorSystemPrompt(workflow),
+        taskId: task.id,
+        stream: opts.stream,
+        onStream: opts.streamOutput,
+      });
+    } catch (error) {
+      const errorMsg =
+        error instanceof StepTimeoutError
+          ? `Orchestrator timeout after ${error.timeoutMs}ms`
+          : error instanceof ClaudeExecutionError
+            ? error.stderr
+            : (error as Error).message;
+
+      await failTask(task.id, errorMsg);
       return {
         status: "failed",
-        error: result.error,
-        stepsCompleted,
+        error: errorMsg,
+        stepsCompleted: stepsExecuted,
         durationMs: Date.now() - startTime,
       };
     }
 
-    stepsCompleted++;
+    // 4. Load the decision
+    const decision = await loadOrchestratorDecision(task.id);
+    if (!decision) {
+      await failTask(task.id, "Orchestrator exited without making a decision");
+      return {
+        status: "failed",
+        error: "Orchestrator exited without making a decision",
+        stepsCompleted: stepsExecuted,
+        durationMs: Date.now() - startTime,
+      };
+    }
 
-    // Reload task to get updated state
-    task = await loadTask(task.id);
+    // 5. Record decision in thread
+    await appendThreadEntry(task.id, {
+      type: "orchestrator_decision",
+      stepName: "__orchestrator__",
+      attemptNumber: iteration,
+      content: JSON.stringify(decision),
+      metadata: decision,
+    });
+
+    // 6. Handle the decision
+    switch (decision.type) {
+      case "run_step": {
+        if (opts.verbose && opts.log) {
+          opts.log(`\nOrchestrator decision: run step "${decision.stepName}"`);
+          if (decision.reason) {
+            opts.log(`Reason: ${decision.reason}`);
+          }
+        }
+
+        // Execute the step
+        const stepResult = await executeStep(
+          task,
+          workflow,
+          decision.stepName,
+          config,
+          opts
+        );
+
+        // Record step result in thread
+        await appendThreadEntry(task.id, {
+          type: "step_result",
+          stepName: decision.stepName,
+          attemptNumber: 1,
+          content: stepResult.output || stepResult.error || "No output",
+          metadata: { success: stepResult.success },
+        });
+
+        stepsExecuted++;
+
+        // Clear resume prompt after use
+        if (task.resumePrompt) {
+          task.resumePrompt = undefined;
+          await updateTask(task);
+        }
+
+        // Reload task and continue loop
+        task = await loadTask(task.id);
+        continue;
+      }
+
+      case "need_input": {
+        if (opts.verbose && opts.log) {
+          opts.log(`\nOrchestrator requests input: ${decision.question}`);
+        }
+
+        await pauseTask(task.id, decision.question);
+        return {
+          status: "paused",
+          stepsCompleted: stepsExecuted,
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      case "complete": {
+        if (opts.verbose && opts.log) {
+          opts.log(`\n${"═".repeat(60)}`);
+          opts.log(`Workflow completed: ${decision.summary}`);
+          opts.log(`Total time: ${formatDuration(Date.now() - startTime)}`);
+          opts.log(`${"═".repeat(60)}`);
+        }
+
+        await completeTask(task.id);
+        return {
+          status: "completed",
+          stepsCompleted: stepsExecuted,
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      case "fail": {
+        if (opts.verbose && opts.log) {
+          opts.log(`\nWorkflow failed: ${decision.reason}`);
+        }
+
+        await failTask(task.id, decision.reason);
+        return {
+          status: "failed",
+          error: decision.reason,
+          stepsCompleted: stepsExecuted,
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      default: {
+        const errorMsg = `Unknown decision type: ${(decision as OrchestratorDecision).type}`;
+        await failTask(task.id, errorMsg);
+        return {
+          status: "failed",
+          error: errorMsg,
+          stepsCompleted: stepsExecuted,
+          durationMs: Date.now() - startTime,
+        };
+      }
+    }
   }
-
-  const durationMs = Date.now() - startTime;
-
-  // All steps completed
-  await completeTask(task.id);
-
-  if (opts.verbose && opts.log) {
-    opts.log(`\n${"═".repeat(60)}`);
-    opts.log(`Workflow completed successfully`);
-    opts.log(`Total time: ${formatDuration(durationMs)}`);
-    opts.log(`${"═".repeat(60)}`);
-  }
-
-  return {
-    status: "completed",
-    stepsCompleted,
-    durationMs,
-  };
 }

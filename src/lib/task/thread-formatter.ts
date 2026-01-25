@@ -22,6 +22,8 @@ export interface FormatOptions {
  */
 function formatEntry(entry: ThreadEntry): string {
   switch (entry.type) {
+    case "task_description":
+      return `<task-description>${escapeXml(entry.content)}</task-description>`;
     case "step_prompt":
       return `<prompt>${escapeXml(entry.content)}</prompt>`;
     case "claude_response":
@@ -32,6 +34,16 @@ function formatEntry(entry: ThreadEntry): string {
       return `<user-answer>${escapeXml(entry.content)}</user-answer>`;
     case "resume_prompt":
       return `<resume-prompt>${escapeXml(entry.content)}</resume-prompt>`;
+    case "orchestrator_decision": {
+      const metadata = entry.metadata as { type?: string; stepName?: string; question?: string; summary?: string; reason?: string } | undefined;
+      const decisionType = metadata?.type || "unknown";
+      return `<orchestrator-decision type="${escapeXml(decisionType)}">${escapeXml(entry.content)}</orchestrator-decision>`;
+    }
+    case "step_result": {
+      const metadata = entry.metadata as { success?: boolean } | undefined;
+      const status = metadata?.success ? "success" : "failure";
+      return `<step-result step="${escapeXml(entry.stepName)}" status="${status}">${escapeXml(entry.content)}</step-result>`;
+    }
     default:
       return `<entry type="${entry.type}">${escapeXml(entry.content)}</entry>`;
   }
@@ -232,6 +244,8 @@ export function formatThreadForDisplay(
  */
 function formatTypeLabel(type: string): string {
   switch (type) {
+    case "task_description":
+      return "Task";
     case "step_prompt":
       return "Prompt";
     case "claude_response":
@@ -242,6 +256,10 @@ function formatTypeLabel(type: string): string {
       return "Answer";
     case "resume_prompt":
       return "Resume";
+    case "orchestrator_decision":
+      return "Decision";
+    case "step_result":
+      return "Result";
     default:
       return type;
   }
