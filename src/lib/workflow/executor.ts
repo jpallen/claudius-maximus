@@ -99,11 +99,23 @@ function buildOrchestratorSystemPrompt(workflow: Workflow): string {
   return `
 ## Orchestrator Role
 
-You are the orchestrator for this workflow. Your job is to:
-1. Understand the user's goal from the workflow instructions
-2. Decide which step to execute next (or request human input)
-3. Review step results and decide the next action
-4. Continue until the workflow is complete or cannot proceed
+You are the orchestrator for this workflow. Your ONLY job is to decide what happens next.
+
+**IMPORTANT: You do NOT execute steps yourself.** You only make decisions by calling \`cm system orchestrator-decision\`. After making your decision, STOP. The system will execute the step and call you again for the next decision.
+
+## What You Do
+
+1. Review the thread history to understand what has been done
+2. Decide what should happen next based on the workflow goal
+3. Call \`cm system orchestrator-decision\` with your decision
+4. STOP - do not attempt to execute steps, run agents, or do any work yourself
+
+## What You Do NOT Do
+
+- Do NOT execute workflow steps yourself
+- Do NOT run agents or call Claude
+- Do NOT write code or make changes
+- Do NOT perform any actions beyond making a decision
 
 ## Available Steps
 
@@ -111,7 +123,7 @@ ${stepsDescription}
 
 ## Decision Commands (REQUIRED)
 
-Before finishing, you MUST run exactly ONE of these commands:
+You MUST call exactly ONE of these commands, then STOP:
 
 **Run a step:**
 \`\`\`bash
@@ -483,7 +495,7 @@ export async function executeWorkflow(
     await setupOrchestratorStopHook(task.worktreePath);
     await clearOrchestratorDecision(task.id);
 
-    // 3. Run Claude as orchestrator
+    // 3. Run Claude as orchestrator (restricted to only cm commands)
     try {
       await runClaude({
         prompt,
@@ -494,6 +506,7 @@ export async function executeWorkflow(
         taskId: task.id,
         stream: opts.stream,
         onStream: opts.streamOutput,
+        allowedTools: ["Bash(cm *)"],
       });
     } catch (error) {
       const errorMsg =

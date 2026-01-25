@@ -2092,3 +2092,219 @@ describe("task thread", () => {
     expect(log).toContain('<step name="plan"');
   });
 });
+
+describe("task create with editor input", () => {
+  let ctx: TestContext;
+  let testRepoDir: string;
+  let mockDir: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    testRepoDir = await createTestRepo();
+    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-editor-"));
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+    await rm(testRepoDir, { recursive: true, force: true });
+    await rm(mockDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Create a mock editor script that writes content to the file
+   */
+  async function createMockEditor(
+    baseDir: string,
+    content: string
+  ): Promise<string> {
+    const scriptPath = join(baseDir, "mock-editor.sh");
+
+    const script = `#!/bin/bash
+# Mock editor that writes specific content to the file
+cat > "$1" << 'EDITOR_EOF'
+${content}
+EDITOR_EOF
+`;
+
+    await Bun.write(scriptPath, script);
+    await chmod(scriptPath, 0o755);
+
+    return scriptPath;
+  }
+
+  it("creates task with description from editor (interactive with mock)", async () => {
+    // Create mock editor that writes a description
+    const mockEditorPath = await createMockEditor(
+      mockDir,
+      "This is a task description from the editor.\n\nIt has multiple lines."
+    );
+
+    // Create task without description argument, using mock editor
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "--no-start"],
+      {
+        EDITOR: mockEditorPath,
+        CM_FORCE_INTERACTIVE: "true",
+      }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Creating task:");
+    expect(result.stdout).toContain("This is a task description from the editor.");
+    expect(result.stdout).toContain("Task created:");
+  });
+
+  it("aborts when editor leaves empty description", async () => {
+    // Create mock editor that leaves only comments
+    const mockEditorPath = await createMockEditor(
+      mockDir,
+      "# This is just a comment\n# And another comment"
+    );
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "--no-start"],
+      {
+        EDITOR: mockEditorPath,
+        CM_FORCE_INTERACTIVE: "true",
+      }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Aborted: empty description");
+    // Should NOT create a task
+    expect(result.stdout).not.toContain("Task created:");
+  });
+
+  it("fails in non-interactive mode without description", async () => {
+    // Run without CM_FORCE_INTERACTIVE and without stdin TTY (default for subprocess)
+    const result = await runCli(ctx, testRepoDir, ["task", "create", "--no-start"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Description required");
+    expect(result.stderr).toContain("Usage: cm task create");
+  });
+
+  it("still works with description argument (backward compatible)", async () => {
+    const result = await runCli(ctx, testRepoDir, [
+      "task",
+      "create",
+      "Direct description argument",
+      "--no-start",
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Creating task:");
+    expect(result.stdout).toContain("Direct description argument");
+    expect(result.stdout).toContain("Task created:");
+  });
+
+  it("strips comment lines from editor content", async () => {
+    // Create mock editor with mixed content and comments
+    const mockEditorPath = await createMockEditor(
+      mockDir,
+      `Actual task description
+# This is a comment that should be stripped
+More description text
+# Another comment
+Final line of description`
+    );
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "--no-start"],
+      {
+        EDITOR: mockEditorPath,
+        CM_FORCE_INTERACTIVE: "true",
+      }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Actual task description");
+    // Comments should be stripped (not visible in output)
+    expect(result.stdout).not.toContain("This is a comment");
+  });
+
+  it("handles editor that fails with non-zero exit code", async () => {
+    // Create mock editor that fails
+    const failingEditorPath = join(mockDir, "failing-editor.sh");
+    await Bun.write(
+      failingEditorPath,
+      `#!/bin/bash
+exit 1
+`
+    );
+    await chmod(failingEditorPath, 0o755);
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "--no-start"],
+      {
+        EDITOR: failingEditorPath,
+        CM_FORCE_INTERACTIVE: "true",
+      }
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Editor error");
+    expect(result.stderr).toContain("exited with code 1");
+  });
+
+  it("uses $VISUAL over $EDITOR when both are set", async () => {
+    // Create two different mock editors
+    const visualEditorPath = await createMockEditor(
+      mockDir,
+      "Description from VISUAL editor"
+    );
+
+    const editorPath = join(mockDir, "wrong-editor.sh");
+    await Bun.write(
+      editorPath,
+      `#!/bin/bash
+echo "Wrong editor should not be used" > "$1"
+`
+    );
+    await chmod(editorPath, 0o755);
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "--no-start"],
+      {
+        VISUAL: visualEditorPath,
+        EDITOR: editorPath,
+        CM_FORCE_INTERACTIVE: "true",
+      }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Description from VISUAL editor");
+  });
+
+  it("works with workflow and other options combined", async () => {
+    const mockEditorPath = await createMockEditor(
+      mockDir,
+      "Editor description with workflow option"
+    );
+
+    const result = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "--workflow", "quick", "--no-start"],
+      {
+        EDITOR: mockEditorPath,
+        CM_FORCE_INTERACTIVE: "true",
+      }
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Editor description with workflow option");
+    expect(result.stdout).toContain("Workflow: quick");
+    expect(result.stdout).toContain("Task created:");
+  });
+});

@@ -75,6 +75,10 @@ export interface ClaudeRunOptions {
   onQuestionAnswer?: QuestionAnswerCallback;
   /** Session ID to resume (for --resume flag) */
   resumeSessionId?: string;
+  /** Allowed tools (e.g., ["Bash(cm *)"] to only allow cm commands) */
+  allowedTools?: string[];
+  /** Disallowed tools */
+  disallowedTools?: string[];
 }
 
 /**
@@ -482,6 +486,8 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     onStream,
     onQuestionAnswer,
     resumeSessionId,
+    allowedTools,
+    disallowedTools,
   } = options;
 
   // Build command arguments
@@ -508,6 +514,18 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
 
   if (appendSystemPrompt) {
     args.push("--append-system-prompt", appendSystemPrompt);
+  }
+
+  // Add tool restrictions
+  if (allowedTools?.length) {
+    for (const tool of allowedTools) {
+      args.push("--allowedTools", tool);
+    }
+  }
+  if (disallowedTools?.length) {
+    for (const tool of disallowedTools) {
+      args.push("--disallowedTools", tool);
+    }
   }
 
   // Build environment with task context

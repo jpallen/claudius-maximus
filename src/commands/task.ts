@@ -90,6 +90,10 @@ async function promptUser(question: string): Promise<string> {
 
 /** Check if running in interactive mode */
 function isInteractive(): boolean {
+  // Allow tests to force interactive mode via env var
+  if (process.env.CM_FORCE_INTERACTIVE === "true") {
+    return true;
+  }
   return process.stdin.isTTY === true;
 }
 
@@ -146,16 +150,37 @@ export function createTaskCommand(): Command {
     "Manage workflow tasks with git worktrees"
   );
 
-  // cm task create "description" [--workflow <name>] [--branch <name>] [--no-start] [--quiet]
+  // cm task create [description] [--workflow <name>] [--branch <name>] [--no-start] [--quiet]
   task
-    .command("create <description>")
+    .command("create [description]")
     .description("Create a new task and optionally run it")
     .option("-w, --workflow <name>", "Workflow to use", "default")
     .option("-b, --branch <name>", "Base branch to create task from")
     .option("--no-start", "Create task without starting execution")
     .option("-q, --quiet", "Suppress streaming output")
-    .action(async (description: string, options) => {
+    .action(async (description: string | undefined, options) => {
       try {
+        // If no description provided, open editor
+        if (!description) {
+          if (!isInteractive()) {
+            console.error(
+              "Error: Description required. Provide it as an argument or run interactively."
+            );
+            console.error('Usage: cm task create "your description"');
+            process.exit(1);
+          }
+
+          // Import editor utility
+          const { openEditorForInput } = await import("../lib/editor");
+
+          description = await openEditorForInput();
+
+          if (!description) {
+            console.log("Aborted: empty description.");
+            return;
+          }
+        }
+
         // Find git root
         const repoPath = await findGitRoot(process.cwd());
 

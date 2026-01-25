@@ -104,3 +104,11 @@ export class InvalidBranchError extends CmError {
     this.branchName = branchName;
   }
 }
+
+/** Error when editor operations fail */
+export class EditorError extends CmError {
+  constructor(message: string) {
+    super(`Editor error: ${message}`);
+    this.name = "EditorError";
+  }
+}
