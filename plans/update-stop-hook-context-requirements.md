@@ -19,20 +19,13 @@ When steps pass information to subsequent steps (e.g., a review step's findings,
 
 1. **`src/lib/workflow/executor.ts`** (lines 198-213)
    - `buildStepCompletionInstructions(stepName: string)` - Generates system prompt instructions appended to each step
-   - Currently says:
-     ```
-     - **Success**: `cm task complete --message "summary of what was done"`
-     - **Failure**: `cm task fail --reason "what went wrong"`
-     ```
+   - Currently provides minimal guidance with placeholder text "summary of what was done"
 
-2. **`src/commands/system.ts`** (lines 127-135)
+2. **`src/commands/system.ts`** (lines 127-147)
    - Stop hook handler - Outputs blocking response when step isn't marked
-   - Currently says:
-     ```
-     Step "${stepName}" not marked complete. Run one of:
-       cm task complete --message "summary"
-       cm task fail --reason "what went wrong"
-     ```
+   - **TWO LOCATIONS** need updating:
+     - Line 132: Primary blocking message
+     - Line 142: Error case catch block (identical message)
 
 3. **`src/commands/task.ts`** (lines 595-624, 626-655)
    - `cm task complete` command implementation
@@ -56,18 +49,20 @@ This means the **only** information available to subsequent steps is:
 ### Functional Requirements
 
 1. Update the system prompt (in `executor.ts`) to clearly explain:
-   - The completion message is the **only** context available to subsequent steps
-   - What constitutes good context for different step types
-   - Examples of what to include (e.g., file paths created, key decisions, full review findings)
+   - **Lead with 'why'**: The completion message is the **only** context available to subsequent steps
+   - **Then explain 'how'**: The command syntax and what to include
+   - Guidance for both success and failure cases
+   - Examples of what to include for different step types
 
-2. Update the stop hook block message (in `system.ts`) to:
-   - Reinforce the context requirement
-   - Be consistent with the system prompt guidance
+2. Update the stop hook block messages (in `system.ts`) to:
+   - Be concise - detailed guidance belongs in system prompt
+   - Reinforce the context requirement briefly
+   - Update **BOTH** occurrences (lines 132 and 142)
 
 ### Non-Functional Requirements
 
 - Changes should be minimal and focused
-- Documentation should be clear but not overly verbose
+- System prompt expansion to ~1500 chars is reasonable for instructional content
 - Should work for all step types (code, review, plan, research, etc.)
 
 ## Proposed Implementation
@@ -82,7 +77,7 @@ This is a documentation/prompt change only - no new modules or structural change
 
 **File**: `src/lib/workflow/executor.ts`
 **Location**: Lines 198-213
-**Change**: Expand the completion instructions to explain context requirements
+**Change**: Expand the completion instructions with "why" first, then "how"
 
 ```typescript
 function buildStepCompletionInstructions(stepName: string): string {
@@ -95,60 +90,85 @@ Your current working directory is a git worktree created for this task. Treat th
 
 You are running step "${stepName}". Before finishing, you MUST run one of:
 
-- **Success**: \`cm task complete --message "summary of what was done"\`
-- **Failure**: \`cm task fail --reason "what went wrong"\`
+- **Success**: \`cm task complete --message "detailed context for next steps"\`
+- **Failure**: \`cm task fail --reason "detailed explanation of what went wrong"\`
 
 You will be blocked from exiting until you run one of these commands.
 
-## CRITICAL: Completion Message Context
+## CRITICAL: Your Message is the ONLY Context for Next Steps
 
-**The completion message is the ONLY information subsequent steps will receive from your work.** Next steps cannot see your conversation, tool calls, or any files you read - they only see your completion message.
+**The completion message is the ONLY information subsequent steps will receive from your work.** Next steps cannot see your conversation, tool calls, or any files you read - they ONLY see your completion message.
 
 Your message must include ALL context needed for the workflow to continue:
 
 **For implementation/code steps:**
-- List specific files created or modified
+- List specific files created or modified with their paths
 - Describe key changes and their purpose
 - Note any important decisions made
+- Include commit hashes if changes were committed
 
 **For review/analysis steps:**
-- Include the FULL review findings or analysis
-- Provide specific file locations and line numbers
+- Include the FULL review findings (not just a summary)
+- Provide specific file locations and line numbers for issues
 - List all issues found with severity and recommendations
+- State clearly whether the review passed or requires changes
 
 **For planning steps:**
 - Include the complete plan OR reference the plan file path
 - List all key decisions and their rationale
-- Note any assumptions or constraints
+- Note any assumptions or constraints identified
 
 **For research/exploration steps:**
 - Summarize all findings comprehensively
 - Include relevant code patterns discovered
 - Note file paths and locations of interest
 
+**For failure messages:**
+- Explain what you were trying to do
+- Describe what went wrong in detail
+- Include any error messages or stack traces
+- Suggest possible remediation steps if known
+
 If your work produced a document (plan, review, etc.), either:
 1. Include the full content in the message, OR
-2. Write it to a file and include the file path: "Full plan written to plans/feature-name.md"
+2. Write it to a file and include the file path with a summary of key points
 `.trim();
 }
 ```
 
-#### Step 2: Update stop hook block message in `system.ts`
+#### Step 2: Update stop hook block messages in `system.ts`
 
 **File**: `src/commands/system.ts`
-**Location**: Lines 127-135
-**Change**: Update the blocking message to reinforce context requirements
+**Location 1**: Lines 127-135 (primary block message)
+**Location 2**: Lines 137-147 (error case catch block)
+**Change**: Update both occurrences with concise messaging that reinforces the context requirement
 
+**Location 1 (line 132):**
 ```typescript
 // Not marked - block exit with instructions
 console.log(
   JSON.stringify({
     decision: "block",
     reason: `Step "${stepName}" not marked complete. Run one of:
-  cm task complete --message "summary with full context for next steps"
-  cm task fail --reason "what went wrong"
+  cm task complete --message "<detailed context for next steps>"
+  cm task fail --reason "<detailed explanation of failure>"
 
-IMPORTANT: Your message is the ONLY context the next step will receive. Include all necessary information (findings, file paths, decisions, etc.) in your completion message.`,
+Remember: Your message is the ONLY context the next step will see.`,
+  })
+);
+```
+
+**Location 2 (line 142):**
+```typescript
+// If we can't load the attempt file, block exit as a safety measure
+console.log(
+  JSON.stringify({
+    decision: "block",
+    reason: `Cannot verify step completion: ${(error as Error).message}. Run one of:
+  cm task complete --message "<detailed context for next steps>"
+  cm task fail --reason "<detailed explanation of failure>"
+
+Remember: Your message is the ONLY context the next step will see.`,
   })
 );
 ```
@@ -179,51 +199,108 @@ None - the implementation is straightforward.
 
 ## Summary of Changes
 
-| File | Change |
-|------|--------|
-| `src/lib/workflow/executor.ts` | Expand `buildStepCompletionInstructions()` to explain context requirements |
-| `src/commands/system.ts` | Update stop hook block message to reinforce context requirement |
+| File | Location | Change |
+|------|----------|--------|
+| `src/lib/workflow/executor.ts` | Lines 198-213 | Expand `buildStepCompletionInstructions()` to explain context requirements, leading with 'why' |
+| `src/commands/system.ts` | Line 132 | Update primary stop hook block message with concise reminder |
+| `src/commands/system.ts` | Line 142 | Update error case block message with concise reminder |
 
 ## Appendix
 
 ### Example Good Completion Messages
 
-**After a code review step:**
+**After a code review step (APPROVED):**
 ```
-Review completed. Findings:
+## Review Complete: APPROVED
 
-## Critical Issues (2)
-1. SQL injection vulnerability in `src/api/users.ts:45` - User input passed directly to query
+The implementation is ready to merge. All changes follow project conventions and the code is well-structured.
+
+### Files Reviewed
+- src/api/users.ts (new endpoints)
+- src/middleware/auth.ts (minor refactor)
+- src/models/User.ts (new fields)
+
+### Findings
+No blocking issues found.
+
+### Minor Suggestions (non-blocking)
+1. Consider adding JSDoc to the new `getUserPreferences` function in src/api/users.ts:45
+2. The error message in src/middleware/auth.ts:23 could be more specific
+
+Verdict: Approved for merge.
+```
+
+**After a code review step (NEEDS REVISION):**
+```
+## Review Complete: NEEDS REVISION
+
+### Critical Issues (2)
+1. **SQL injection vulnerability** in `src/api/users.ts:45`
+   - User input passed directly to query
    - Recommendation: Use parameterized queries
-2. Hardcoded credentials in `src/config/db.ts:12`
+
+2. **Hardcoded credentials** in `src/config/db.ts:12`
    - Recommendation: Move to environment variables
 
-## Warnings (3)
+### Warnings (3)
 1. Unused import in `src/utils/helpers.ts:3`
 2. Missing error handling in `src/api/auth.ts:78-85`
 3. Console.log left in production code at `src/index.ts:23`
 
-## Suggestions
+### Suggestions
 - Consider adding input validation middleware
 - Add unit tests for auth flow
 
 Files reviewed: src/api/*.ts, src/config/*.ts, src/utils/*.ts
+
+Verdict: Cannot approve until critical issues are resolved.
 ```
 
 **After a planning step:**
 ```
-Plan created and written to plans/feature-name.md
+Plan created at plans/user-auth-feature.md
 
-Key decisions:
+## Key Decisions
 1. Will use existing auth middleware pattern from src/middleware/auth.ts
 2. New endpoint will be added to src/api/users.ts
 3. Database migration needed for new user_preferences table
 
-Files to create:
+## Files to Create
 - src/migrations/001_user_preferences.ts
 - src/api/preferences.ts
 
-Files to modify:
+## Files to Modify
 - src/api/users.ts (add import)
 - src/routes/index.ts (register new route)
+
+## Architecture
+Using JWT tokens stored in httpOnly cookies (following existing pattern in auth.ts).
+Session data stored in Redis as per current infrastructure.
+
+Estimated complexity: Medium (3-5 hours implementation)
+```
+
+**After a failed step:**
+```
+## Step Failed: Could not complete implementation
+
+### What I was trying to do
+Implement the user preferences API endpoint as specified in the plan.
+
+### What went wrong
+The existing User model in src/models/User.ts uses a different ORM (TypeORM) than expected. The plan assumed Prisma based on package.json, but the actual implementation uses TypeORM.
+
+### Error encountered
+```
+TypeError: User.findUnique is not a function
+    at src/api/preferences.ts:23
+```
+
+### Suggested remediation
+1. Update the plan to use TypeORM patterns (User.findOne instead of findUnique)
+2. Review src/models/*.ts for correct query patterns
+3. Re-run implementation step with corrected approach
+
+### Files modified before failure
+- src/api/preferences.ts (partial implementation - needs correction)
 ```
