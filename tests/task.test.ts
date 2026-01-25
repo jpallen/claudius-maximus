@@ -216,15 +216,27 @@ async function runCli(
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 
+  // Build environment, clearing any inherited CM_* variables to prevent
+  // contamination from parent task contexts (e.g., when tests run within a cm task)
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    // Clear inherited CM environment variables
+    CM_TASK_ID: undefined,
+    CM_STEP_NAME: undefined,
+    CM_STEP_ATTEMPT: undefined,
+    CM_WORKTREE_PATH: undefined,
+    CM_ORCHESTRATOR: undefined,
+    // Set test-specific values
+    CM_CONFIG_DIR: ctx.configDir,
+    // Apply any explicit overrides from the test
+    ...extraEnv,
+  };
+
   const proc = Bun.spawn(["bun", "run", CLI_ENTRY, ...args], {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
-    env: {
-      ...process.env,
-      CM_CONFIG_DIR: ctx.configDir,
-      ...extraEnv,
-    },
+    env,
   });
 
   const [stdout, stderr] = await Promise.all([
@@ -551,7 +563,7 @@ describe("workflow execution with mock Claude", () => {
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     // Run all steps
@@ -614,7 +626,7 @@ fi
     expect(result.stdout).toContain("cm task resume");
 
     // Check status shows paused
-    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = result.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     const statusResult = await runCli(ctx, testRepoDir, ["task", "status", taskId]);
@@ -631,17 +643,17 @@ fi
     const script = `#!/bin/bash
 echo "CALL: $@" >> "${logPath}"
 
-# Track iteration
-if [[ -f "${iterationPath}" ]]; then
-  ITER=$(cat "${iterationPath}")
-else
-  ITER=0
-fi
-echo $((ITER + 1)) > "${iterationPath}"
-
 if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
+  # Orchestrator call - track iterations
+  if [[ -f "${iterationPath}" ]]; then
+    ITER=$(cat "${iterationPath}")
+  else
+    ITER=0
+  fi
+  echo $((ITER + 1)) > "${iterationPath}"
+
   if [[ $ITER -eq 0 ]]; then
-    # First call - request input
+    # First orchestrator call - request input
     ${cmCommand} system orchestrator-decision --need-input --question "What should I do?"
   else
     # After resume - complete
@@ -650,6 +662,10 @@ if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
   exit 0
 elif [[ -n "$CM_STEP_NAME" ]]; then
   ${cmCommand} task complete --message "Step done"
+  exit 0
+else
+  # Regular call without task context (e.g., branch name generation)
+  echo '{"result": "mock-output"}'
   exit 0
 fi
 `;
@@ -667,7 +683,7 @@ fi
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     expect(createResult.stdout).toContain("Task is paused");
@@ -697,7 +713,7 @@ fi
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     // Check initial status
@@ -1417,7 +1433,7 @@ exit 0
     expect(createResult.exitCode).toBe(0);
 
     // Extract task ID
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     // Check that attempt file was created
@@ -1486,7 +1502,7 @@ exit 0
     expect(result.stdout).toContain("Workflow completed");
 
     // Check attempt file shows explicit completion
-    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = result.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const tasksDir = join(ctx.configDir, "tasks");
     const attemptData = JSON.parse(
@@ -1514,7 +1530,7 @@ exit 0
     expect(result.stdout).toContain("Workflow failed");
 
     // Check attempt file shows explicit failure
-    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = result.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const tasksDir = join(ctx.configDir, "tasks");
     const attemptData = JSON.parse(
@@ -1542,7 +1558,7 @@ exit 0
     expect(createResult.exitCode).toBe(0);
 
     // Extract task ID and find worktree
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
 
@@ -1577,7 +1593,7 @@ exit 0
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
 
@@ -1654,7 +1670,7 @@ fi
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
     const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
 
@@ -1695,7 +1711,7 @@ fi
 
     expect(createResult.exitCode).toBe(0);
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     // Check attempt-1 was created for the execute step
@@ -1795,7 +1811,7 @@ describe("branch management", () => {
         "task", "create", "Test task", "--no-start"
       ]);
 
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       const taskId = match![1];
 
       const statusResult = await runCli(ctx, testRepoDir, ["task", "status", taskId]);
@@ -1811,7 +1827,7 @@ describe("branch management", () => {
         "task", "create", "Test task", "--no-start"
       ]);
 
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       const taskId = match![1];
 
       const mergeResult = await runCli(ctx, testRepoDir, ["task", "merge", taskId]);
@@ -1834,7 +1850,7 @@ describe("branch management", () => {
 
       expect(createResult.exitCode).toBe(0);
 
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       const taskId = match![1];
 
       // Task is completed but has no commits (mock Claude doesn't make any)
@@ -1855,7 +1871,7 @@ describe("branch management", () => {
         { CM_CLAUDE_COMMAND: scriptPath }
       );
 
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       const taskId = match![1];
 
       // Make a commit in the task worktree
@@ -1893,7 +1909,7 @@ describe("branch management", () => {
         { CM_CLAUDE_COMMAND: scriptPath }
       );
 
-      const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+      const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
       const taskId = match![1];
 
       // Make a commit in the task worktree
@@ -1956,8 +1972,8 @@ describe("task thread", () => {
 
     expect(result.exitCode).toBe(0);
 
-    // Extract task ID
-    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    // Extract task ID - support both adjective-noun and semantic formats
+    const match = result.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     // Check thread file exists
@@ -1988,7 +2004,7 @@ describe("task thread", () => {
 
     expect(result.exitCode).toBe(0);
 
-    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = result.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     const tasksDir = join(ctx.configDir, "tasks");
@@ -2020,7 +2036,7 @@ describe("task thread", () => {
 
     expect(result.exitCode).toBe(0);
 
-    const match = result.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = result.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     const tasksDir = join(ctx.configDir, "tasks");
@@ -2049,7 +2065,7 @@ describe("task thread", () => {
 
     expect(createResult.exitCode).toBe(0);
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     // View the thread
@@ -2070,7 +2086,7 @@ describe("task thread", () => {
       { CM_CLAUDE_COMMAND: scriptPath }
     );
 
-    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const match = createResult.stdout.match(/Task created: ([a-z][a-z0-9-]+)/);
     const taskId = match![1];
 
     // View thread as JSON

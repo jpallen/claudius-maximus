@@ -534,6 +534,13 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     ...process.env,
     // Ensure non-interactive mode
     CI: "true",
+    // Clear any inherited CM environment variables to prevent contamination
+    // from parent task contexts (e.g., when tests run within a cm task)
+    CM_TASK_ID: undefined,
+    CM_STEP_NAME: undefined,
+    CM_STEP_ATTEMPT: undefined,
+    CM_WORKTREE_PATH: undefined,
+    CM_ORCHESTRATOR: undefined,
   };
 
   // Add task context env vars for completion tracking
