@@ -1,0 +1,141 @@
+version: "1"
+
+workflows:
+  # Full development cycle: plan → review → execute → review
+  default:
+    prompt: |
+      You are orchestrating a feature development workflow for the cm-cli project.
+
+      Follow this cycle:
+
+      1. PLAN: Use the plan step to create a detailed implementation plan.
+         The feature-planner will explore the codebase and produce a plan in plans/.
+
+      2. REVIEW PLAN: Use the review step to have the plan reviewed.
+         The review-coordinator will assess the plan and delegate to specialists.
+         If the review identifies issues, return to the plan step to refine.
+         Iterate until the plan is approved.
+
+      3. EXECUTE: Once the plan is approved, use the execute step.
+         The plan-implementer will implement exactly what the plan specifies.
+         If execution is blocked, return to planning to resolve ambiguities.
+
+      4. REVIEW IMPLEMENTATION: Use the review step again to review the code.
+         The review-coordinator will check the implementation quality.
+         If issues are found, return to execute with specific fixes.
+         Iterate until the implementation is approved.
+
+      Key principles:
+      - Never skip the plan review - get approval before implementing
+      - Never skip the implementation review - verify quality before completing
+      - Be willing to iterate multiple times if needed
+      - When returning to a step, provide context about what needs to change
+
+      Complete the task when the implementation review approves the changes.
+    steps:
+      - name: plan
+        agent: feature-planner
+        prompt: |
+          Create a comprehensive implementation plan for the requested feature.
+
+          Explore the codebase thoroughly to understand:
+          - Existing patterns and conventions
+          - Where new code should be placed
+          - How to integrate with existing functionality
+
+          Produce a detailed plan in plans/<feature-name>.md that can be
+          implemented without further planning.
+
+          If this is a refinement after review feedback, focus on addressing
+          the specific concerns raised.
+
+      - name: execute
+        agent: plan-implementer
+        prompt: |
+          Implement the approved plan exactly as specified.
+
+          Follow the plan step by step. Do not deviate or add improvements
+          beyond what the plan specifies.
+
+          If you encounter blockers or ambiguities, stop and report them
+          rather than making assumptions.
+
+          If this is a refinement after review feedback, implement only the
+          specific changes requested.
+
+      - name: review
+        agent: review-coordinator
+        prompt: |
+          Review the current work product (plan or implementation).
+
+          For plan reviews:
+          - Is the plan complete and actionable?
+          - Does it follow project conventions?
+          - Are there architectural concerns?
+          - Is the testing strategy adequate?
+
+          For implementation reviews:
+          - Does the code match the plan?
+          - Is the code quality acceptable?
+          - Are there bugs or edge cases missed?
+          - Do the tests cover the functionality?
+
+          Provide specific, actionable feedback. Clearly state whether
+          the work is approved or needs revision.
+
+  # Quick workflow: single-step execution for simple tasks
+  quick:
+    prompt: |
+      This is a quick task that doesn't need the full plan-review cycle.
+      Execute it directly in one step.
+    steps:
+      - name: execute
+        prompt: |
+          Complete this simple task directly.
+
+          This workflow is for straightforward changes that don't need
+          detailed planning - small fixes, simple additions, or obvious
+          implementations.
+
+  # Research workflow: investigation without implementation
+  research:
+    prompt: |
+      This is a research task. Investigate and report findings but do not
+      implement any changes.
+    steps:
+      - name: investigate
+        agent: feature-planner
+        prompt: |
+          Research and analyze the requested topic.
+
+          Explore the codebase, understand the relevant systems, and
+          document your findings. Do not create an implementation plan
+          unless specifically asked - focus on understanding and reporting.
+
+          Produce a research document in plans/ with your analysis.
+
+  # Plan-only workflow: create a plan for user to review manually
+  plan-only:
+    prompt: |
+      Create a detailed implementation plan without executing it.
+      The user will review the plan manually before deciding to implement.
+    steps:
+      - name: plan
+        agent: feature-planner
+        prompt: |
+          Create a comprehensive implementation plan for the requested feature.
+
+          This plan will be reviewed by the user manually, so make it
+          especially clear and detailed. Include all context needed for
+          someone to understand and implement the plan.
+
+          Produce the plan in plans/<feature-name>.md.
+
+      - name: review
+        agent: review-coordinator
+        prompt: |
+          Review the plan before presenting it to the user.
+
+          Ensure the plan is complete, follows project conventions, and
+          is ready for user review. Flag any concerns or open questions
+          that the user should consider.
