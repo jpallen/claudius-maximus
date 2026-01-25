@@ -17,6 +17,7 @@ export function createSystemCommand(): Command {
       const taskId = process.env.CM_TASK_ID;
       const stepName = process.env.CM_STEP_NAME;
       const attemptStr = process.env.CM_STEP_ATTEMPT;
+      const worktreePath = process.env.CM_WORKTREE_PATH;
 
       // Not a managed task session - allow exit
       if (!taskId || !stepName || !attemptStr) {
@@ -27,6 +28,47 @@ export function createSystemCommand(): Command {
       if (isNaN(attempt) || attempt < 1) {
         // Invalid attempt - allow exit (shouldn't happen)
         process.exit(0);
+      }
+
+      // Dynamic import to avoid circular dependencies
+      const { getUncommittedChanges } = await import("../lib/task/worktree");
+
+      // Check for uncommitted changes if we have the worktree path
+      if (worktreePath) {
+        try {
+          const changes = await getUncommittedChanges(worktreePath);
+
+          if (changes.hasChanges) {
+            const fileList: string[] = [];
+            if (changes.staged.length > 0) {
+              fileList.push("Staged:", ...changes.staged.map(f => `  + ${f}`));
+            }
+            if (changes.unstaged.length > 0) {
+              fileList.push("Modified:", ...changes.unstaged.map(f => `  M ${f}`));
+            }
+            if (changes.untracked.length > 0) {
+              fileList.push("Untracked:", ...changes.untracked.map(f => `  ? ${f}`));
+            }
+
+            console.log(
+              JSON.stringify({
+                decision: "block",
+                reason: `You have uncommitted git changes. Please commit or discard them before completing the step.\n\n${fileList.join("\n")}\n\nTo commit: git add <files> && git commit -m "message"\nTo discard: git checkout -- <file>`,
+              })
+            );
+
+            process.exit(2);
+          }
+        } catch (error) {
+          // If git check fails, still block with a warning
+          console.log(
+            JSON.stringify({
+              decision: "block",
+              reason: `Cannot check git status: ${(error as Error).message}. Please verify no uncommitted changes exist.`,
+            })
+          );
+          process.exit(2);
+        }
       }
 
       try {

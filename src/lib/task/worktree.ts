@@ -247,6 +247,71 @@ export async function branchExists(
   return exitCode === 0;
 }
 
+/**
+ * Git uncommitted changes info
+ */
+export interface UncommittedChanges {
+  hasChanges: boolean;
+  staged: string[];     // Files staged for commit
+  unstaged: string[];   // Modified but not staged
+  untracked: string[];  // New untracked files
+}
+
+/**
+ * Check for uncommitted git changes in a directory
+ * @throws WorktreeError if git command fails
+ */
+export async function getUncommittedChanges(cwd: string): Promise<UncommittedChanges> {
+  // Get status in porcelain format
+  const proc = Bun.spawn(["git", "status", "--porcelain"], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+
+  if (exitCode !== 0) {
+    throw new WorktreeError("git status", stderr.trim() || `Exit code ${exitCode}`);
+  }
+
+  const staged: string[] = [];
+  const unstaged: string[] = [];
+  const untracked: string[] = [];
+
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+
+    const indexStatus = line[0];
+    const workTreeStatus = line[1];
+    const filePath = line.slice(3);
+
+    // Index status (staged changes)
+    if (indexStatus !== " " && indexStatus !== "?") {
+      staged.push(filePath);
+    }
+
+    // Work tree status (unstaged changes)
+    if (workTreeStatus !== " " && workTreeStatus !== "?") {
+      unstaged.push(filePath);
+    }
+
+    // Untracked files
+    if (indexStatus === "?" && workTreeStatus === "?") {
+      untracked.push(filePath);
+    }
+  }
+
+  return {
+    hasChanges: staged.length > 0 || unstaged.length > 0 || untracked.length > 0,
+    staged,
+    unstaged,
+    untracked,
+  };
+}
+
 /** Commit info for merge summary */
 export interface CommitInfo {
   hash: string;
@@ -255,6 +320,7 @@ export interface CommitInfo {
 
 /**
  * Check if task branch has commits ahead of base branch
+ * @throws WorktreeError if git command fails
  */
 export async function hasCommitsToMerge(
   repoPath: string,
@@ -273,10 +339,11 @@ export async function hasCommitsToMerge(
   );
 
   const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
   if (exitCode !== 0) {
-    return false;
+    throw new WorktreeError("check commits", stderr.trim() || `Exit code ${exitCode}`);
   }
 
   const count = parseInt(stdout.trim(), 10);
@@ -285,6 +352,7 @@ export async function hasCommitsToMerge(
 
 /**
  * Get list of commits to merge from task branch to base branch
+ * @throws WorktreeError if git command fails
  */
 export async function getTaskCommitSummary(
   repoPath: string,
@@ -303,10 +371,11 @@ export async function getTaskCommitSummary(
   );
 
   const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
 
   if (exitCode !== 0) {
-    return [];
+    throw new WorktreeError("get commit summary", stderr.trim() || `Exit code ${exitCode}`);
   }
 
   const commits: CommitInfo[] = [];

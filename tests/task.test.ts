@@ -2093,6 +2093,273 @@ describe("task thread", () => {
   });
 });
 
+describe("uncommitted changes check", () => {
+  let ctx: TestContext;
+  let testRepoDir: string;
+  let mockDir: string;
+
+  beforeEach(async () => {
+    ctx = await createTestContext();
+    testRepoDir = await createTestRepo();
+    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-"));
+  });
+
+  afterEach(async () => {
+    await ctx.cleanup();
+    await rm(testRepoDir, { recursive: true, force: true });
+    await rm(mockDir, { recursive: true, force: true });
+  });
+
+  it("stop-hook blocks when uncommitted changes exist", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    // Create task with worktree
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test uncommitted", "--no-start"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+
+    // Setup attempt file manually (simulating running step)
+    const tasksDir = join(ctx.configDir, "tasks");
+    const stepName = "execute";
+    const attemptDir = join(tasksDir, taskId, "steps", stepName);
+    await mkdir(attemptDir, { recursive: true });
+
+    const attemptData = {
+      attemptNumber: 1,
+      status: "running",
+      startedAt: new Date().toISOString(),
+    };
+    await Bun.write(
+      join(attemptDir, "attempt-1.json"),
+      JSON.stringify(attemptData)
+    );
+
+    // Create uncommitted changes in worktree
+    await Bun.write(join(worktreePath, "uncommitted.txt"), "uncommitted content");
+
+    // Run stop-hook with CM_WORKTREE_PATH set
+    const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+      CM_TASK_ID: taskId,
+      CM_STEP_NAME: stepName,
+      CM_STEP_ATTEMPT: "1",
+      CM_WORKTREE_PATH: worktreePath,
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toContain("uncommitted");
+    expect(result.stdout).toContain("uncommitted.txt");
+    expect(result.stdout).toContain("Untracked:");
+  });
+
+  it("stop-hook allows exit when changes are committed", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    // Create task with worktree
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test committed", "--no-start"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+
+    // Setup attempt file with explicit completion
+    const tasksDir = join(ctx.configDir, "tasks");
+    const stepName = "execute";
+    const attemptDir = join(tasksDir, taskId, "steps", stepName);
+    await mkdir(attemptDir, { recursive: true });
+
+    const attemptData = {
+      attemptNumber: 1,
+      status: "completed",
+      startedAt: new Date().toISOString(),
+      explicitlyCompleted: true,
+    };
+    await Bun.write(
+      join(attemptDir, "attempt-1.json"),
+      JSON.stringify(attemptData)
+    );
+
+    // Make and commit a change in the worktree
+    await Bun.write(join(worktreePath, "committed.txt"), "committed content");
+    await Bun.spawn(["git", "add", "committed.txt"], {
+      cwd: worktreePath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exited;
+    await Bun.spawn(["git", "commit", "-m", "Add committed file"], {
+      cwd: worktreePath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exited;
+
+    // Run stop-hook
+    const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+      CM_TASK_ID: taskId,
+      CM_STEP_NAME: stepName,
+      CM_STEP_ATTEMPT: "1",
+      CM_WORKTREE_PATH: worktreePath,
+    });
+
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("stop-hook shows all types of uncommitted changes", async () => {
+    const { scriptPath } = await createMockClaude(mockDir);
+
+    const createResult = await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test all changes", "--no-start"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const match = createResult.stdout.match(/Task created: ([a-z]+-[a-z]+)/);
+    const taskId = match![1];
+    const worktreePath = join(testRepoDir, ".cm-worktrees", taskId);
+
+    // Setup attempt file
+    const tasksDir = join(ctx.configDir, "tasks");
+    const stepName = "execute";
+    const attemptDir = join(tasksDir, taskId, "steps", stepName);
+    await mkdir(attemptDir, { recursive: true });
+
+    const attemptData = {
+      attemptNumber: 1,
+      status: "running",
+      startedAt: new Date().toISOString(),
+    };
+    await Bun.write(
+      join(attemptDir, "attempt-1.json"),
+      JSON.stringify(attemptData)
+    );
+
+    // Create staged file
+    await Bun.write(join(worktreePath, "staged.txt"), "staged content");
+    await Bun.spawn(["git", "add", "staged.txt"], {
+      cwd: worktreePath,
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exited;
+
+    // Create modified (unstaged) file - modify existing README.md
+    await Bun.write(join(worktreePath, "README.md"), "# Modified\n");
+
+    // Create untracked file
+    await Bun.write(join(worktreePath, "untracked.txt"), "untracked content");
+
+    // Run stop-hook
+    const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+      CM_TASK_ID: taskId,
+      CM_STEP_NAME: stepName,
+      CM_STEP_ATTEMPT: "1",
+      CM_WORKTREE_PATH: worktreePath,
+    });
+
+    expect(result.exitCode).toBe(2);
+
+    const output = JSON.parse(result.stdout);
+    expect(output.reason).toContain("staged.txt");
+    expect(output.reason).toContain("README.md");
+    expect(output.reason).toContain("untracked.txt");
+    expect(output.reason).toContain("Staged:");
+    expect(output.reason).toContain("Modified:");
+    expect(output.reason).toContain("Untracked:");
+  });
+
+  it("passes CM_WORKTREE_PATH to Claude subprocess", async () => {
+    // Create custom mock that logs CM_WORKTREE_PATH
+    const scriptPath = join(mockDir, "mock-claude-worktree");
+    const logPath = join(mockDir, "claude-calls.log");
+    const stepCountPath = join(mockDir, "step-count");
+    const cmCommand = `bun run "${CLI_ENTRY}"`;
+
+    const script = `#!/bin/bash
+echo "CALL: $@" >> "${logPath}"
+echo "CM_WORKTREE_PATH: $CM_WORKTREE_PATH" >> "${logPath}"
+echo "---" >> "${logPath}"
+
+# Track iteration
+if [[ -f "${stepCountPath}" ]]; then
+  COUNT=$(cat "${stepCountPath}")
+else
+  COUNT=0
+fi
+echo $((COUNT + 1)) > "${stepCountPath}"
+
+if [[ -n "$CM_TASK_ID" && -z "$CM_STEP_NAME" ]]; then
+  if [[ $COUNT -eq 0 ]]; then
+    ${cmCommand} system orchestrator-decision --step "execute" --reason "Running step"
+  else
+    ${cmCommand} system orchestrator-decision --complete --summary "Done"
+  fi
+  exit 0
+elif [[ -n "$CM_STEP_NAME" ]]; then
+  ${cmCommand} task complete --message "Step done"
+  exit 0
+fi
+`;
+
+    await Bun.write(scriptPath, script);
+    await chmod(scriptPath, 0o755);
+    await Bun.write(logPath, "");
+    await Bun.write(stepCountPath, "0");
+
+    await runCli(
+      ctx,
+      testRepoDir,
+      ["task", "create", "Test env var", "--workflow", "quick"],
+      { CM_CLAUDE_COMMAND: scriptPath }
+    );
+
+    const log = await readMockLog(logPath);
+    expect(log).toContain("CM_WORKTREE_PATH:");
+    expect(log).toContain(".cm-worktrees/");
+  });
+
+  it("stop-hook skips uncommitted check when CM_WORKTREE_PATH is not set", async () => {
+    // Setup attempt file with running status (no explicit completion)
+    const tasksDir = join(ctx.configDir, "tasks");
+    const taskId = "test-no-worktree-path";
+    const stepName = "execute";
+    const attemptDir = join(tasksDir, taskId, "steps", stepName);
+    await mkdir(attemptDir, { recursive: true });
+
+    const attemptData = {
+      attemptNumber: 1,
+      status: "running",
+      startedAt: new Date().toISOString(),
+    };
+    await Bun.write(
+      join(attemptDir, "attempt-1.json"),
+      JSON.stringify(attemptData)
+    );
+
+    // Run stop-hook WITHOUT CM_WORKTREE_PATH
+    const result = await runCli(ctx, testRepoDir, ["system", "stop-hook"], {
+      CM_TASK_ID: taskId,
+      CM_STEP_NAME: stepName,
+      CM_STEP_ATTEMPT: "1",
+      // Note: CM_WORKTREE_PATH intentionally NOT set
+    });
+
+    // Should still block for explicit completion, but NOT for uncommitted changes
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toContain("not marked complete");
+    expect(result.stdout).not.toContain("uncommitted");
+  });
+});
+
 describe("task create with editor input", () => {
   let ctx: TestContext;
   let testRepoDir: string;

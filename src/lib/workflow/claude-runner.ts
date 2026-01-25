@@ -546,6 +546,11 @@ export async function runClaude(options: ClaudeRunOptions): Promise<ClaudeResult
     env.CM_STEP_ATTEMPT = String(taskStepAttempt);
   }
 
+  // Add worktree path for stop-hook to check uncommitted changes
+  if (cwd) {
+    env.CM_WORKTREE_PATH = cwd;
+  }
+
   // Start the process
   const proc = Bun.spawn(args, {
     cwd,
