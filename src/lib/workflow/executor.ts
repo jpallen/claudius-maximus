@@ -197,6 +197,10 @@ async function buildOrchestratorPrompt(
  */
 function buildStepCompletionInstructions(stepName: string): string {
   return `
+## Working Directory
+
+Your current working directory is a git worktree created for this task. Treat this directory as your project root. All file operations, searches, and code changes should be relative to this directory. Do NOT navigate to or reference parent directories or other paths outside this worktree.
+
 ## Task Completion (REQUIRED)
 
 You are running step "${stepName}". Before finishing, you MUST run one of:
