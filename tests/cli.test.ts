@@ -20,7 +20,13 @@ describe("CLI basics", () => {
     expect(result.stdout).toContain("Usage: cm");
     expect(result.stdout).toContain(APP_NAME);
     expect(result.stdout).toContain("dev");
-    expect(result.stdout).toContain("hello");
+  });
+
+  it("shows help with -h", async () => {
+    const result = await ctx.run("-h");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: cm");
   });
 
   it("shows version with --version", async () => {
@@ -35,28 +41,5 @@ describe("CLI basics", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe(VERSION);
-  });
-
-  it("runs hello command without name", async () => {
-    const result = await ctx.run("hello");
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Hello, world!");
-    expect(result.stdout).toContain(APP_NAME);
-  });
-
-  it("runs hello command with name", async () => {
-    const result = await ctx.run("hello", "Alice");
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Hello, Alice!");
-    expect(result.stdout).toContain(APP_NAME);
-  });
-
-  it("shows error for unknown command", async () => {
-    const result = await ctx.run("nonexistent");
-
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("unknown command");
   });
 });

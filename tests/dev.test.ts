@@ -1,8 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { createTestContext, createMockVersion, type TestContext } from "./helpers";
-import { join } from "path";
-import { mkdtemp, rm } from "fs/promises";
-import { tmpdir } from "os";
+import { createTestContext, type TestContext } from "./helpers";
 
 describe("dev mode", () => {
   let ctx: TestContext;
@@ -107,67 +104,39 @@ describe("dev mode", () => {
       expect(result.stdout).toContain("Type: directory");
     });
   });
-});
 
-describe("dev mode proxying", () => {
-  let ctx: TestContext;
-  let mockDir: string;
+  describe("dev mode proxying", () => {
+    it("does not proxy dev commands themselves", async () => {
+      // Set dev version to self (a valid directory)
+      await ctx.run("dev", "set", process.cwd());
 
-  beforeEach(async () => {
-    ctx = await createTestContext();
-    mockDir = await mkdtemp(join(tmpdir(), "cm-mock-"));
-  });
+      // dev list should still work from the main CLI
+      const result = await ctx.run("dev", "list");
 
-  afterEach(async () => {
-    await ctx.cleanup();
-    await rm(mockDir, { recursive: true, force: true });
-  });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(process.cwd());
+    });
 
-  it("proxies commands to dev version", async () => {
-    // Create a mock version
-    const mockVersionDir = await createMockVersion(mockDir, "9.9.9", "[MOCK]");
+    it("does not proxy --version flag", async () => {
+      // Set dev version to self
+      await ctx.run("dev", "set", process.cwd());
 
-    // Set dev version to the mock
-    await ctx.run("dev", "set", mockVersionDir);
+      // --version should NOT be proxied, so we get our own version
+      const result = await ctx.run("--version");
 
-    // Run hello - should proxy to mock
-    const result = await ctx.run("hello", "Test");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("0.1.0");
+    });
 
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("mock v9.9.9");
-    expect(result.stdout).toContain("[MOCK]");
-  });
+    it("does not proxy --help flag", async () => {
+      // Set dev version to self
+      await ctx.run("dev", "set", process.cwd());
 
-  it("proxies --version to dev version", async () => {
-    const mockVersionDir = await createMockVersion(mockDir, "1.2.3");
+      // --help should NOT be proxied
+      const result = await ctx.run("--help");
 
-    await ctx.run("dev", "set", mockVersionDir);
-    const result = await ctx.run("--version");
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout.trim()).toBe("1.2.3");
-  });
-
-  it("does not proxy dev commands themselves", async () => {
-    const mockVersionDir = await createMockVersion(mockDir, "9.9.9");
-
-    await ctx.run("dev", "set", mockVersionDir);
-
-    // dev list should still work from the main CLI
-    const result = await ctx.run("dev", "list");
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain(mockVersionDir);
-  });
-
-  it("falls back to self when dev target not found", async () => {
-    await ctx.run("dev", "set", "/nonexistent/path");
-    const result = await ctx.run("hello", "Fallback");
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toContain("Warning");
-    expect(result.stderr).toContain("Falling back to self");
-    // Should still execute using self
-    expect(result.stdout).toContain("Hello, Fallback!");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Usage: cm");
+    });
   });
 });

@@ -189,6 +189,12 @@ export async function maybeProxyToDevVersion(args: string[]): Promise<boolean> {
     return false;
   }
 
+  // Don't proxy --version or --help flags
+  if (args.includes("--version") || args.includes("-v") ||
+      args.includes("--help") || args.includes("-h")) {
+    return false;
+  }
+
   const devPath = await getDevVersionPath();
   if (!devPath) {
     return false;

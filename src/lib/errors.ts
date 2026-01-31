@@ -10,30 +10,6 @@ export class CmError extends Error {
   }
 }
 
-/** Error when cm.yml file is not found */
-export class ConfigNotFoundError extends CmError {
-  constructor(searchPath: string) {
-    super(`No cm.yml found in ${searchPath} or parent directories`);
-    this.name = "ConfigNotFoundError";
-  }
-}
-
-/** Error when cm.yml has invalid format or schema */
-export class ConfigValidationError extends CmError {
-  constructor(message: string) {
-    super(`Invalid cm.yml: ${message}`);
-    this.name = "ConfigValidationError";
-  }
-}
-
-/** Error when a workflow is not found */
-export class WorkflowNotFoundError extends CmError {
-  constructor(workflowName: string) {
-    super(`Workflow "${workflowName}" not found in cm.yml`);
-    this.name = "WorkflowNotFoundError";
-  }
-}
-
 /** Error when a task is not found */
 export class TaskNotFoundError extends CmError {
   constructor(taskId: string) {
@@ -60,32 +36,6 @@ export class WorktreeError extends CmError {
   }
 }
 
-/** Error when Claude CLI execution fails */
-export class ClaudeExecutionError extends CmError {
-  exitCode: number;
-  stderr: string;
-
-  constructor(exitCode: number, stderr: string) {
-    super(`Claude CLI exited with code ${exitCode}: ${stderr}`);
-    this.name = "ClaudeExecutionError";
-    this.exitCode = exitCode;
-    this.stderr = stderr;
-  }
-}
-
-/** Error when a step times out */
-export class StepTimeoutError extends CmError {
-  stepName: string;
-  timeoutMs: number;
-
-  constructor(stepName: string, timeoutMs: number) {
-    super(`Step "${stepName}" timed out after ${timeoutMs}ms`);
-    this.name = "StepTimeoutError";
-    this.stepName = stepName;
-    this.timeoutMs = timeoutMs;
-  }
-}
-
 /** Error when not in a git repository */
 export class NotInGitRepoError extends CmError {
   constructor() {
@@ -105,10 +55,10 @@ export class InvalidBranchError extends CmError {
   }
 }
 
-/** Error when editor operations fail */
-export class EditorError extends CmError {
-  constructor(message: string) {
-    super(`Editor error: ${message}`);
-    this.name = "EditorError";
+/** Error when tmux is not available */
+export class TmuxNotAvailableError extends CmError {
+  constructor() {
+    super("tmux is not installed or not available in PATH");
+    this.name = "TmuxNotAvailableError";
   }
 }

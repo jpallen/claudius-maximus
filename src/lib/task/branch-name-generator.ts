@@ -2,8 +2,6 @@
  * Generate semantic branch names from task descriptions using Claude
  */
 
-import { runClaude, parseClaudeOutput } from "../workflow/claude-runner";
-
 /** Prompt for Claude to generate branch names */
 const BRANCH_NAME_PROMPT = `Generate a short, descriptive git branch name for this task.
 
@@ -24,10 +22,7 @@ Return ONLY the branch name, nothing else. No explanation, no quotes, just the b
  * Generate a branch name from a task description using Claude
  *
  * @param description - The task description to generate a branch name from
- * @param cwd - Working directory for Claude CLI invocation. This is typically the
- *              repository root path. Required because Claude CLI needs to run in
- *              a valid directory context, even though this function doesn't use
- *              any files from the directory.
+ * @param cwd - Working directory for Claude CLI invocation
  * @returns Generated branch name, or null if generation fails
  */
 export async function generateBranchName(
@@ -41,34 +36,56 @@ export async function generateBranchName(
 
   try {
     const prompt = BRANCH_NAME_PROMPT.replace("{description}", description.trim());
+    const claudeCommand = process.env.CM_CLAUDE_COMMAND || "claude";
 
-    const result = await runClaude({
-      prompt,
-      model: "haiku", // Fast and cheap
+    const proc = Bun.spawn([claudeCommand, "-p", prompt, "--model", "haiku", "--allowedTools", ""], {
       cwd,
-      timeout: 10000, // 10 second timeout
-      stream: false,
-      // No tools needed - pure text generation
-      allowedTools: [],
+      stdout: "pipe",
+      stderr: "pipe",
     });
 
-    if (!result.success) {
+    // Set up timeout
+    const timeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => {
+        proc.kill();
+        resolve(null);
+      }, 10000);
+    });
+
+    const resultPromise = (async () => {
+      const exitCode = await proc.exited;
+      if (exitCode !== 0) {
+        return null;
+      }
+
+      const stdout = await new Response(proc.stdout).text();
+
+      // Parse Claude's JSON output
+      try {
+        const lines = stdout.trim().split("\n");
+        for (const line of lines) {
+          if (line.trim()) {
+            const data = JSON.parse(line);
+            if (data.type === "result" && data.result) {
+              const branchName = cleanBranchName(data.result);
+              if (isValidBranchName(branchName)) {
+                return branchName;
+              }
+            }
+          }
+        }
+      } catch {
+        // JSON parse failed, try treating raw output as branch name
+        const branchName = cleanBranchName(stdout);
+        if (isValidBranchName(branchName)) {
+          return branchName;
+        }
+      }
+
       return null;
-    }
+    })();
 
-    const parsed = parseClaudeOutput(result.stdout);
-    if (!parsed.result) {
-      return null;
-    }
-
-    // Clean and validate the result
-    const branchName = cleanBranchName(parsed.result);
-
-    if (!isValidBranchName(branchName)) {
-      return null;
-    }
-
-    return branchName;
+    return await Promise.race([resultPromise, timeoutPromise]);
   } catch {
     // Fail silently - caller will use fallback
     return null;
