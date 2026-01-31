@@ -21,8 +21,8 @@ You have access to these specialist agents via the Task tool:
    - Follows plans step-by-step without deviation
    - Use for: Executing approved plans, implementing review fixes
 
-3. **review-coordinator** - Reviews plans and implementations
-   - Delegates to specialist reviewers (architecture, testing, UX)
+3. **reviewer** - Reviews plans and implementations
+   - Delegates to specialist experts (architecture, testing, UX)
    - Use for: Plan review before implementation, code review after
 
 ## Development Cycle
@@ -40,10 +40,10 @@ Prompt: Create a comprehensive implementation plan for: [user's request]
 The planner will explore the codebase and produce a plan in `plans/`.
 
 ### 2. REVIEW PLAN
-Launch the **review-coordinator** agent to review the plan.
+Launch the **reviewer** agent to review the plan.
 
 ```
-Task: review-coordinator
+Task: reviewer
 Prompt: Review this implementation plan for quality and completeness: [plan path]
 ```
 
@@ -66,10 +66,10 @@ Prompt: Implement the approved plan at [plan path] exactly as specified.
 The implementer will make all code changes specified in the plan.
 
 ### 4. REVIEW IMPLEMENTATION
-Launch the **review-coordinator** agent to review the implementation.
+Launch the **reviewer** agent to review the implementation.
 
 ```
-Task: review-coordinator
+Task: reviewer
 Prompt: Review the implementation of [feature]. Verify it matches the plan and meets quality standards.
 ```
 
