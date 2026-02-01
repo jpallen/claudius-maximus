@@ -6,7 +6,7 @@ import React, { useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import { TaskList } from "./components/TaskList";
 import { TaskCreator } from "./components/TaskCreator";
-import { AgentSelector } from "./components/AgentSelector";
+import { RunModeSelector, type RunModeSelection } from "./components/RunModeSelector";
 import { StatusBar, type AppView } from "./components/StatusBar";
 import { useTasks } from "./hooks/useTasks";
 
@@ -40,17 +40,18 @@ export function App(): React.ReactElement {
 
   const handlePromptSubmit = (prompt: string) => {
     setPendingPrompt(prompt);
-    setView("agent");
+    setView("mode");
   };
 
-  const handleAgentSelect = async (agentPath: string | undefined) => {
+  const handleModeSelect = async (selection: RunModeSelection) => {
     if (!pendingPrompt) return;
 
     setCreating(true);
     try {
       await createTask({
         prompt: pendingPrompt,
-        agent: agentPath,
+        agent: selection.type === "agent" ? selection.path : undefined,
+        workflow: selection.type === "workflow" ? selection.name : undefined,
       });
       setPendingPrompt(null);
       setView("list");
@@ -109,12 +110,12 @@ export function App(): React.ReactElement {
         />
       )}
 
-      {view === "agent" && (
-        <AgentSelector
-          onSelect={handleAgentSelect}
+      {view === "mode" && (
+        <RunModeSelector
+          onSelect={handleModeSelect}
           onCancel={() => {
-            // Skip agent selection, use no agent
-            handleAgentSelect(undefined);
+            // Skip mode selection, use default
+            handleModeSelect({ type: "default" });
           }}
         />
       )}
