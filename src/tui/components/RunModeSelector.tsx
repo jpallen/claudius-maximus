@@ -17,6 +17,7 @@ export type RunModeSelection =
 interface RunModeSelectorProps {
   onSelect: (selection: RunModeSelection) => void;
   onCancel: () => void;
+  disabled?: boolean;
 }
 
 interface SelectableItem {
@@ -25,7 +26,7 @@ interface SelectableItem {
   value: string;
 }
 
-export function RunModeSelector({ onSelect, onCancel }: RunModeSelectorProps): React.ReactElement {
+export function RunModeSelector({ onSelect, onCancel, disabled = false }: RunModeSelectorProps): React.ReactElement {
   const [items, setItems] = useState<SelectableItem[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -75,7 +76,7 @@ export function RunModeSelector({ onSelect, onCancel }: RunModeSelectorProps): R
         onSelect({ type: "default" });
       }
     }
-  });
+  }, { isActive: !disabled });
 
   if (loading) {
     return (

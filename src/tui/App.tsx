@@ -46,7 +46,7 @@ export function App(): React.ReactElement {
         exit();
       }
     }
-  });
+  }, { isActive: !creating && !merging });
 
   const handleStartMerge = async (taskId: string) => {
     try {
@@ -190,6 +190,7 @@ export function App(): React.ReactElement {
             // Skip mode selection, use default
             handleModeSelect({ type: "default" });
           }}
+          disabled={creating}
         />
       )}
 
@@ -198,6 +199,7 @@ export function App(): React.ReactElement {
           task={pendingMergeTask}
           onSelect={handleMergeSelect}
           onCancel={handleCancel}
+          disabled={merging}
         />
       )}
 

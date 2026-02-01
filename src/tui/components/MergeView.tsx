@@ -18,9 +18,10 @@ interface MergeViewProps {
   task: Task;
   onSelect: (option: MergeOption) => void;
   onCancel: () => void;
+  disabled?: boolean;
 }
 
-export function MergeView({ task, onSelect, onCancel }: MergeViewProps): React.ReactElement {
+export function MergeView({ task, onSelect, onCancel, disabled = false }: MergeViewProps): React.ReactElement {
   const [commits, setCommits] = useState<CommitInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -73,7 +74,7 @@ export function MergeView({ task, onSelect, onCancel }: MergeViewProps): React.R
     } else if (key.return) {
       onSelect(options[selectedIndex].key);
     }
-  });
+  }, { isActive: !disabled });
 
   if (loading) {
     return (
