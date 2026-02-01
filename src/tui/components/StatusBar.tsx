@@ -50,7 +50,7 @@ function getHintsForView(view: AppView): KeyHint[] {
       return [
         { key: "j/k", description: "Navigate" },
         { key: "Enter", description: "Select" },
-        { key: "Esc", description: "Default" },
+        { key: "Esc", description: "Cancel" },
       ];
     case "merge":
       return [

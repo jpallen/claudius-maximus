@@ -186,10 +186,7 @@ export function App(): React.ReactElement {
       {view === "mode" && (
         <RunModeSelector
           onSelect={handleModeSelect}
-          onCancel={() => {
-            // Skip mode selection, use default
-            handleModeSelect({ type: "default" });
-          }}
+          onCancel={handleCancel}
           disabled={creating}
         />
       )}
