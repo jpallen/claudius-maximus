@@ -70,3 +70,64 @@ export class WorkflowNotFoundError extends CmError {
     this.name = "WorkflowNotFoundError";
   }
 }
+
+/** Error when there are uncommitted changes that block an operation */
+export class UncommittedChangesError extends CmError {
+  staged: string[];
+  unstaged: string[];
+  untracked: string[];
+
+  constructor(
+    staged: string[],
+    unstaged: string[],
+    untracked: string[]
+  ) {
+    const message = formatUncommittedChangesMessage(staged, unstaged, untracked);
+    super(message);
+    this.name = "UncommittedChangesError";
+    this.staged = staged;
+    this.unstaged = unstaged;
+    this.untracked = untracked;
+  }
+}
+
+/**
+ * Format a clear, actionable message for Claude about uncommitted changes
+ */
+export function formatUncommittedChangesMessage(
+  staged: string[],
+  unstaged: string[],
+  untracked: string[]
+): string {
+  const lines: string[] = [
+    "Cannot stop: there are uncommitted changes in this task worktree.",
+    "",
+    "You must handle these files before stopping:",
+  ];
+
+  if (staged.length > 0) {
+    lines.push("");
+    lines.push("Staged files (commit these):");
+    staged.forEach(f => lines.push(`  - ${f}`));
+  }
+
+  if (unstaged.length > 0) {
+    lines.push("");
+    lines.push("Modified files (commit or discard changes):");
+    unstaged.forEach(f => lines.push(`  - ${f}`));
+  }
+
+  if (untracked.length > 0) {
+    lines.push("");
+    lines.push("Untracked files (commit, delete, or add to .gitignore):");
+    untracked.forEach(f => lines.push(`  - ${f}`));
+  }
+
+  lines.push("");
+  lines.push("Actions to take:");
+  lines.push("  1. Commit all intended changes: git add <files> && git commit -m 'message'");
+  lines.push("  2. Delete any temporary/generated files you don't need");
+  lines.push("  3. Add any files that should be ignored to .gitignore");
+
+  return lines.join("\n");
+}

@@ -5,6 +5,7 @@ import { render } from "ink";
 import { APP_NAME, CLI_NAME, VERSION } from "./lib/constants";
 import { createDevCommand, maybeProxyToDevVersion } from "./commands/dev";
 import { createTaskCommand } from "./commands/task";
+import { createHooksCommand } from "./commands/hooks";
 import { isInTmux, isTmuxInstalled } from "./lib/tmux/detector";
 import { launchInTmux } from "./lib/tmux/launcher";
 import { App } from "./tui/App";
@@ -20,8 +21,8 @@ async function main() {
     return; // We proxied, so we're done
   }
 
-  // Handle 'dev' and 'task' subcommands with Commander.js
-  if (args.length >= 1 && (args[0] === "dev" || args[0] === "task")) {
+  // Handle 'dev', 'task', and 'hooks' subcommands with Commander.js
+  if (args.length >= 1 && (args[0] === "dev" || args[0] === "task" || args[0] === "hooks")) {
     const program = new Command();
     program
       .name(CLI_NAME)
@@ -30,6 +31,7 @@ async function main() {
 
     program.addCommand(createDevCommand());
     program.addCommand(createTaskCommand());
+    program.addCommand(createHooksCommand());
 
     await program.parseAsync(process.argv);
     return;
@@ -46,6 +48,7 @@ async function main() {
     console.log(`\nUsage: ${CLI_NAME} [command]`);
     console.log(`\nCommands:`);
     console.log(`  task          Manage tasks (create, merge, list)`);
+    console.log(`  hooks         Claude Code hook commands`);
     console.log(`  dev           Manage dev mode - use a different version for testing`);
     console.log(`  (default)     Open the task manager TUI`);
     console.log(`\nThe TUI will launch inside tmux. If tmux is not running, it will be started automatically.`);
