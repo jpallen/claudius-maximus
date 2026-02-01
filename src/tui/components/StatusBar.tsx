@@ -5,7 +5,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 
-export type AppView = "list" | "create" | "mode";
+export type AppView = "list" | "create" | "mode" | "merge";
 
 interface StatusBarProps {
   view: AppView;
@@ -37,6 +37,7 @@ function getHintsForView(view: AppView): KeyHint[] {
       return [
         { key: "n", description: "New task" },
         { key: "Enter", description: "Focus task" },
+        { key: "m", description: "Merge task" },
         { key: "r", description: "Refresh" },
         { key: "q", description: "Quit" },
       ];
@@ -50,6 +51,12 @@ function getHintsForView(view: AppView): KeyHint[] {
         { key: "j/k", description: "Navigate" },
         { key: "Enter", description: "Select" },
         { key: "Esc", description: "Default" },
+      ];
+    case "merge":
+      return [
+        { key: "j/k", description: "Navigate" },
+        { key: "Enter", description: "Select" },
+        { key: "Esc", description: "Cancel" },
       ];
     default:
       return [];

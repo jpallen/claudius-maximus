@@ -7,8 +7,11 @@ import { Box, Text, useApp, useInput } from "ink";
 import { TaskList } from "./components/TaskList";
 import { TaskCreator } from "./components/TaskCreator";
 import { RunModeSelector, type RunModeSelection } from "./components/RunModeSelector";
+import { MergeView, type MergeOption } from "./components/MergeView";
 import { StatusBar, type AppView } from "./components/StatusBar";
 import { useTasks } from "./hooks/useTasks";
+import { getTask } from "../lib/task/manager";
+import type { Task } from "../lib/task/types";
 
 export function App(): React.ReactElement {
   const { exit } = useApp();
@@ -19,12 +22,16 @@ export function App(): React.ReactElement {
     refresh,
     createTask,
     focusTask,
+    mergeTask,
   } = useTasks();
 
   const [view, setView] = useState<AppView>("list");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  const [pendingMergeTask, setPendingMergeTask] = useState<Task | null>(null);
   const [creating, setCreating] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
 
   useInput((input, key) => {
     if (view === "list") {
@@ -32,11 +39,63 @@ export function App(): React.ReactElement {
         setView("create");
       } else if (input === "r") {
         refresh();
+      } else if (input === "m" && tasks.length > 0) {
+        // Start merge flow for selected task
+        handleStartMerge(tasks[selectedIndex].id);
       } else if (input === "q" || key.escape) {
         exit();
       }
     }
   });
+
+  const handleStartMerge = async (taskId: string) => {
+    try {
+      const task = await getTask(taskId);
+      // Only allow merge for active or completed tasks
+      if (task.status === "merged") {
+        setMergeError("Task is already merged");
+        return;
+      }
+      if (task.status === "abandoned") {
+        setMergeError("Cannot merge abandoned task");
+        return;
+      }
+      setPendingMergeTask(task);
+      setMergeError(null);
+      setView("merge");
+    } catch (err) {
+      setMergeError(err instanceof Error ? err.message : "Failed to load task");
+    }
+  };
+
+  const handleMergeSelect = async (option: MergeOption) => {
+    if (!pendingMergeTask) return;
+
+    if (option === "cancel") {
+      setPendingMergeTask(null);
+      setView("list");
+      return;
+    }
+
+    setMerging(true);
+    try {
+      const cleanup = option === "merge-cleanup";
+      const result = await mergeTask(pendingMergeTask.id, cleanup);
+
+      if (!result.success) {
+        setMergeError(result.error || "Merge failed");
+      } else {
+        setMergeError(null);
+      }
+
+      setPendingMergeTask(null);
+      setView("list");
+    } catch (err) {
+      setMergeError(err instanceof Error ? err.message : "Merge failed");
+    } finally {
+      setMerging(false);
+    }
+  };
 
   const handlePromptSubmit = (prompt: string) => {
     setPendingPrompt(prompt);
@@ -65,6 +124,8 @@ export function App(): React.ReactElement {
 
   const handleCancel = () => {
     setPendingPrompt(null);
+    setPendingMergeTask(null);
+    setMergeError(null);
     setView("list");
   };
 
@@ -82,6 +143,12 @@ export function App(): React.ReactElement {
         </Box>
       )}
 
+      {mergeError && view === "list" && (
+        <Box marginY={1}>
+          <Text color="red">Merge error: {mergeError}</Text>
+        </Box>
+      )}
+
       {loading && view === "list" && (
         <Box marginY={1}>
           <Text color="gray">Loading tasks...</Text>
@@ -94,7 +161,13 @@ export function App(): React.ReactElement {
         </Box>
       )}
 
-      {!loading && !creating && view === "list" && (
+      {merging && (
+        <Box marginY={1}>
+          <Text color="yellow">Merging...</Text>
+        </Box>
+      )}
+
+      {!loading && !creating && !merging && view === "list" && (
         <TaskList
           tasks={tasks}
           selectedIndex={selectedIndex}
@@ -117,6 +190,14 @@ export function App(): React.ReactElement {
             // Skip mode selection, use default
             handleModeSelect({ type: "default" });
           }}
+        />
+      )}
+
+      {view === "merge" && pendingMergeTask && (
+        <MergeView
+          task={pendingMergeTask}
+          onSelect={handleMergeSelect}
+          onCancel={handleCancel}
         />
       )}
 

@@ -3,7 +3,7 @@
  */
 
 /** Task execution status */
-export type TaskStatus = "active" | "completed" | "abandoned";
+export type TaskStatus = "active" | "completed" | "merged" | "abandoned";
 
 /** Complete task state */
 export interface Task {

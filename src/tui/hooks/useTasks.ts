@@ -11,6 +11,7 @@ import {
   completeTask as completeTaskManager,
   abandonTask as abandonTaskManager,
   deleteTask as deleteTaskManager,
+  markTaskMerged,
   setTaskTmuxWindow,
 } from "../../lib/task/manager";
 import {
@@ -18,8 +19,17 @@ import {
   focusWindow,
   windowExists,
 } from "../../lib/tmux/window-manager";
-import { findGitRoot } from "../../lib/task/worktree";
+import {
+  findGitRoot,
+  mergeTaskBranch,
+  removeWorktree,
+} from "../../lib/task/worktree";
 import { loadWorkflow, generateWorkflowSystemPrompt } from "../../lib/workflow";
+
+export interface MergeResult {
+  success: boolean;
+  error?: string;
+}
 
 export interface UseTasksResult {
   tasks: TaskSummary[];
@@ -31,6 +41,7 @@ export interface UseTasksResult {
   completeTask: (taskId: string) => Promise<void>;
   abandonTask: (taskId: string) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
+  mergeTask: (taskId: string, cleanup: boolean) => Promise<MergeResult>;
 }
 
 export function useTasks(): UseTasksResult {
@@ -101,6 +112,40 @@ export function useTasks(): UseTasksResult {
     await refresh();
   }, [refresh]);
 
+  const mergeTask = useCallback(async (taskId: string, cleanup: boolean): Promise<MergeResult> => {
+    try {
+      const task = await getTask(taskId);
+
+      // Perform the merge
+      const result = await mergeTaskBranch(task.repoPath, taskId, task.baseBranch);
+
+      if (!result.success) {
+        return {
+          success: false,
+          error: result.conflicted
+            ? "Merge conflicts detected. Resolve manually."
+            : result.error || "Merge failed",
+        };
+      }
+
+      // Mark task as merged
+      await markTaskMerged(taskId);
+
+      // Cleanup if requested
+      if (cleanup) {
+        await removeWorktree(task.repoPath, taskId, true);
+      }
+
+      await refresh();
+      return { success: true };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : "Merge failed",
+      };
+    }
+  }, [refresh]);
+
   return {
     tasks,
     loading,
@@ -111,5 +156,6 @@ export function useTasks(): UseTasksResult {
     completeTask,
     abandonTask,
     deleteTask,
+    mergeTask,
   };
 }

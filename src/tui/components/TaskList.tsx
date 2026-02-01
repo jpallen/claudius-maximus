@@ -79,6 +79,9 @@ function TaskRow({ task, isSelected }: TaskRowProps): React.ReactElement {
       {task.agent && (
         <Text color="magenta"> [{getAgentName(task.agent)}]</Text>
       )}
+      {task.workflow && (
+        <Text color="cyan"> [{task.workflow}]</Text>
+      )}
     </Box>
   );
 }
@@ -89,6 +92,8 @@ function getStatusIcon(status: string): string {
       return "\u25cf"; // ●
     case "completed":
       return "\u2713"; // ✓
+    case "merged":
+      return "\u2714"; // ✔
     case "abandoned":
       return "\u25cb"; // ○
     default:
@@ -102,6 +107,8 @@ function getStatusColor(status: string): string {
       return "green";
     case "completed":
       return "blue";
+    case "merged":
+      return "magenta";
     case "abandoned":
       return "gray";
     default:

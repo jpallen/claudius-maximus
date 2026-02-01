@@ -294,3 +294,14 @@ export async function setTaskTmuxWindow(taskId: string, windowName: string): Pro
   await saveTask(task);
   return task;
 }
+
+/**
+ * Mark a task as merged
+ */
+export async function markTaskMerged(taskId: string): Promise<Task> {
+  const task = await loadTask(taskId);
+  task.status = "merged";
+  task.tmuxWindow = undefined;
+  await saveTask(task);
+  return task;
+}
