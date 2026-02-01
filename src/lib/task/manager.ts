@@ -96,6 +96,7 @@ async function updateIndexEntry(task: Task): Promise<void> {
     createdAt: task.createdAt,
     tmuxWindow: task.tmuxWindow,
     agent: task.agent,
+    workflow: task.workflow,
   };
 
   const existingIndex = index.tasks.findIndex((t) => t.id === task.id);
@@ -210,6 +211,7 @@ export async function createTask(
     repoPath: actualRepoPath,
     baseBranch,
     agent: options.agent,
+    workflow: options.workflow,
     createdAt: new Date().toISOString(),
   };
 

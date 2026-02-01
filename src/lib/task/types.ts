@@ -23,6 +23,8 @@ export interface Task {
   tmuxWindow?: string;
   /** Optional agent path (from .claude/agents/) */
   agent?: string;
+  /** Optional workflow name (from .claudius-maximus/workflows/) */
+  workflow?: string;
   /** When the task was created */
   createdAt: string;
 }
@@ -35,6 +37,7 @@ export interface TaskSummary {
   createdAt: string;
   tmuxWindow?: string;
   agent?: string;
+  workflow?: string;
 }
 
 /** Index file structure for quick task listing */
@@ -48,6 +51,8 @@ export interface CreateTaskOptions {
   prompt: string;
   /** Optional agent path */
   agent?: string;
+  /** Optional workflow name */
+  workflow?: string;
   /** Base branch to create task from (default: current branch) */
   baseBranch?: string;
 }

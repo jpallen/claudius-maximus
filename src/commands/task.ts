@@ -12,6 +12,7 @@ import {
   findGitRoot,
   removeWorktree,
 } from "../lib/task/worktree";
+import { loadWorkflow, generateWorkflowSystemPrompt } from "../lib/workflow";
 
 export function createTaskCommand(): Command {
   const task = new Command("task").description("Manage tasks");
@@ -21,22 +22,50 @@ export function createTaskCommand(): Command {
     .command("create <prompt>")
     .description("Create a task and start Claude session")
     .option("--agent <path>", "Agent configuration file")
+    .option("--workflow <name>", "Workflow to execute (from .claudius-maximus/workflows/)")
     .option("--base <branch>", "Base branch (default: current)")
-    .action(async (prompt: string, options: { agent?: string; base?: string }) => {
+    .action(async (prompt: string, options: { agent?: string; workflow?: string; base?: string }) => {
+      // Validate mutually exclusive options
+      if (options.agent && options.workflow) {
+        console.error("Error: Cannot specify both --agent and --workflow");
+        process.exit(1);
+      }
+
       const repoPath = await findGitRoot(process.cwd());
+
+      // Load workflow and generate system prompt if specified
+      let workflowSystemPrompt: string | undefined;
+      if (options.workflow) {
+        const workflow = await loadWorkflow(repoPath, options.workflow);
+        workflowSystemPrompt = generateWorkflowSystemPrompt(workflow);
+      }
+
       const newTask = await createTask(
-        { prompt, agent: options.agent, baseBranch: options.base },
+        { prompt, agent: options.agent, workflow: options.workflow, baseBranch: options.base },
         repoPath
       );
 
       console.log(`Created task: ${newTask.id}`);
       console.log(`Worktree: ${newTask.worktreePath}`);
       console.log(`Branch: cm-task/${newTask.id}`);
+      if (options.workflow) {
+        console.log(`Workflow: ${options.workflow}`);
+      }
       console.log(`\nStarting Claude...\n`);
 
-      // Spawn Claude in foreground (interactive)
+      // Build Claude command args
       const claudeCmd = process.env.CM_CLAUDE_COMMAND || "claude";
-      const args = options.agent ? ["--agent", options.agent, prompt] : [prompt];
+      const args: string[] = [];
+
+      if (options.agent) {
+        args.push("--agent", options.agent);
+      }
+
+      if (workflowSystemPrompt) {
+        args.push("--append-system-prompt", workflowSystemPrompt);
+      }
+
+      args.push(prompt);
 
       const proc = Bun.spawn([claudeCmd, ...args], {
         cwd: newTask.worktreePath,

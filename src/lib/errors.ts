@@ -62,3 +62,11 @@ export class TmuxNotAvailableError extends CmError {
     this.name = "TmuxNotAvailableError";
   }
 }
+
+/** Error when a workflow is not found */
+export class WorkflowNotFoundError extends CmError {
+  constructor(workflowName: string) {
+    super(`Workflow "${workflowName}" not found in .claudius-maximus/workflows/`);
+    this.name = "WorkflowNotFoundError";
+  }
+}

@@ -18,6 +18,8 @@ import {
   focusWindow,
   windowExists,
 } from "../../lib/tmux/window-manager";
+import { findGitRoot } from "../../lib/task/worktree";
+import { loadWorkflow, generateWorkflowSystemPrompt } from "../../lib/workflow";
 
 export interface UseTasksResult {
   tasks: TaskSummary[];
@@ -54,10 +56,18 @@ export function useTasks(): UseTasksResult {
   }, [refresh]);
 
   const createTask = useCallback(async (options: CreateTaskOptions): Promise<Task> => {
+    // Load workflow system prompt if workflow specified
+    let workflowSystemPrompt: string | undefined;
+    if (options.workflow) {
+      const repoPath = await findGitRoot(process.cwd());
+      const workflow = await loadWorkflow(repoPath, options.workflow);
+      workflowSystemPrompt = generateWorkflowSystemPrompt(workflow);
+    }
+
     const task = await createTaskManager(options);
 
     // Create tmux window for Claude (prompt is passed directly to claude command)
-    const windowName = await createClaudeWindow(task);
+    const windowName = await createClaudeWindow(task, workflowSystemPrompt);
 
     // Update task with window name
     await setTaskTmuxWindow(task.id, windowName);

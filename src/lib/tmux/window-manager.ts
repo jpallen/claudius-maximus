@@ -7,9 +7,13 @@ import type { Task } from "../task/types";
 /**
  * Create a new tmux window for a Claude session
  * @param task - The task to create a window for
+ * @param workflowSystemPrompt - Optional system prompt for workflow mode
  * @returns The window name
  */
-export async function createClaudeWindow(task: Task): Promise<string> {
+export async function createClaudeWindow(
+  task: Task,
+  workflowSystemPrompt?: string
+): Promise<string> {
   const windowName = `claude-${task.id}`;
   const claudeCommand = process.env.CM_CLAUDE_COMMAND || "claude";
 
@@ -21,6 +25,15 @@ export async function createClaudeWindow(task: Task): Promise<string> {
   if (task.agent) {
     claudeCmd += ` --agent '${task.agent}'`;
   }
+
+  // Handle workflow system prompt - write to temp file to avoid shell escaping issues
+  let tempPromptPath: string | undefined;
+  if (workflowSystemPrompt) {
+    tempPromptPath = `/tmp/cm-workflow-${task.id}.txt`;
+    await Bun.write(tempPromptPath, workflowSystemPrompt);
+    claudeCmd += ` --append-system-prompt "$(cat '${tempPromptPath}')"`;
+  }
+
   // Pass the prompt as a positional argument
   claudeCmd += ` '${escapedPrompt}'`;
 
