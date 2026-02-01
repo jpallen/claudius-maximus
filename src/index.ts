@@ -4,6 +4,7 @@ import React from "react";
 import { render } from "ink";
 import { APP_NAME, CLI_NAME, VERSION } from "./lib/constants";
 import { createDevCommand, maybeProxyToDevVersion } from "./commands/dev";
+import { createTaskCommand } from "./commands/task";
 import { isInTmux, isTmuxInstalled } from "./lib/tmux/detector";
 import { launchInTmux } from "./lib/tmux/launcher";
 import { App } from "./tui/App";
@@ -19,8 +20,8 @@ async function main() {
     return; // We proxied, so we're done
   }
 
-  // Handle 'dev' subcommand with Commander.js
-  if (args.length >= 1 && args[0] === "dev") {
+  // Handle 'dev' and 'task' subcommands with Commander.js
+  if (args.length >= 1 && (args[0] === "dev" || args[0] === "task")) {
     const program = new Command();
     program
       .name(CLI_NAME)
@@ -28,6 +29,7 @@ async function main() {
       .version(VERSION, "-v, --version", "Display version number");
 
     program.addCommand(createDevCommand());
+    program.addCommand(createTaskCommand());
 
     await program.parseAsync(process.argv);
     return;
@@ -43,6 +45,7 @@ async function main() {
     console.log(`${APP_NAME} v${VERSION}`);
     console.log(`\nUsage: ${CLI_NAME} [command]`);
     console.log(`\nCommands:`);
+    console.log(`  task          Manage tasks (create, merge, list)`);
     console.log(`  dev           Manage dev mode - use a different version for testing`);
     console.log(`  (default)     Open the task manager TUI`);
     console.log(`\nThe TUI will launch inside tmux. If tmux is not running, it will be started automatically.`);

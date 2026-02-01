@@ -402,6 +402,31 @@ export interface MergeResult {
 }
 
 /**
+ * Detect if current directory is inside a task worktree
+ * Returns task info if in a worktree, null otherwise
+ */
+export async function detectTaskFromCwd(
+  cwd: string
+): Promise<{ taskId: string; repoPath: string } | null> {
+  // Check if path contains .cm-worktrees/<taskId>
+  const match = cwd.match(/\.cm-worktrees\/([^\/]+)/);
+  if (!match) return null;
+
+  const taskId = match[1];
+  const repoPath = cwd.substring(0, cwd.indexOf(".cm-worktrees")).replace(/\/$/, "");
+
+  // Verify by checking branch name
+  try {
+    const branch = await getCurrentBranch(cwd);
+    if (branch !== `cm-task/${taskId}`) return null;
+  } catch {
+    return null;
+  }
+
+  return { taskId, repoPath };
+}
+
+/**
  * Merge task branch into base branch
  */
 export async function mergeTaskBranch(
