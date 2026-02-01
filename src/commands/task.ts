@@ -55,7 +55,8 @@ export function createTaskCommand(): Command {
 
       // Build Claude command args
       const claudeCmd = process.env.CM_CLAUDE_COMMAND || "claude";
-      const args: string[] = [];
+      // Always skip permissions for automated workflows
+      const args: string[] = ["--dangerously-skip-permissions"];
 
       if (options.agent) {
         args.push("--agent", options.agent);

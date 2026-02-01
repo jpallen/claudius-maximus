@@ -22,6 +22,8 @@ export async function createClaudeWindow(
   const escapedPrompt = task.prompt.replace(/'/g, "'\\''");
 
   let claudeCmd = `${claudeCommand}`;
+  // Always skip permissions for automated workflows in orchestration mode
+  claudeCmd += " --dangerously-skip-permissions";
   if (task.agent) {
     claudeCmd += ` --agent '${task.agent}'`;
   }
